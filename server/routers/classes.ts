@@ -1,0 +1,1807 @@
+import { z } from "zod";
+import { eq, desc, and, inArray, or, ilike } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
+import crypto from "crypto";
+import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
+import { getDb } from "../queries/connection";
+import { classes, attendance, oneToOneSessions, batchEnrollments, batches, profiles, users, classBatches, classJoinRequests, attendanceAlerts, oneToOneRescheduleRequests } from "@db/schema";
+import { sendBulkNotification, sendNotification, getAdminUserIds } from "../lib/notificationEngine";
+import { getIo } from "../lib/socketInstance";
+import { isStudentFeeRestricted } from "../lib/feeHelper";
+import { updateStudentSessionBalances } from "../lib/sessionHelper";
+import { generateJitsiToken } from "../lib/jitsi";
+
+
+export const classRouter = createRouter({
+  list: authedQuery
+    .input(z.object({ batchId: z.number().optional(), status: z.string().optional() }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const filters = [];
+      if (input?.status) filters.push(eq(classes.status, input.status as "scheduled" | "ongoing" | "completed" | "cancelled"));
+      if (ctx.user.role === "teacher") filters.push(eq(classes.teacherId, ctx.user.id));
+
+      if (input?.batchId) {
+        const cbList = await db.select({ classId: classBatches.classId }).from(classBatches).where(eq(classBatches.batchId, input.batchId));
+        const classIds = cbList.map(x => x.classId);
+
+        const batchConditions = [eq(classes.batchId, input.batchId)];
+        if (classIds.length > 0) {
+          batchConditions.push(inArray(classes.id, classIds));
+        }
+        filters.push(or(...batchConditions));
+      } else if (ctx.user.role === "student") {
+        const studentEnrollments = await db.query.batchEnrollments.findMany({
+          where: and(
+            eq(batchEnrollments.studentId, ctx.user.id),
+            or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+          ),
+          columns: { batchId: true },
+        });
+        const batchIds = studentEnrollments.map((e) => e.batchId);
+        if (batchIds.length === 0) {
+          return [];
+        }
+
+        const cbList = await db.select({ classId: classBatches.classId }).from(classBatches).where(inArray(classBatches.batchId, batchIds));
+        const classIds = cbList.map(x => x.classId);
+
+        const studentConditions = [inArray(classes.batchId, batchIds)];
+        if (classIds.length > 0) {
+          studentConditions.push(inArray(classes.id, classIds));
+        }
+        filters.push(or(...studentConditions));
+      }
+
+      const where = filters.length > 0 ? and(...filters) : undefined;
+      const list = await db.query.classes.findMany({
+        where,
+        orderBy: desc(classes.scheduledAt),
+        with: {
+          teacher: true,
+          batch: true,
+          classBatches: {
+            with: {
+              batch: true
+            }
+          }
+        },
+      });
+
+      const isRestricted = ctx.user.role === "student" ? await isStudentFeeRestricted(ctx.user.id) : false;
+
+      return list.map(cls => ({
+        ...cls,
+        meetingUrl: isRestricted ? null : cls.meetingUrl,
+        recordingUrl: isRestricted ? null : cls.recordingUrl,
+        batch: cls.batch || null,
+        batches: cls.classBatches?.map(cb => cb.batch).filter(Boolean) || []
+      }));
+    }),
+
+  getMeetingDetails: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+        with: { teacher: true, batch: true },
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Access Control - Stricter permissions
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      if (!isSuperAdmin) {
+        if (ctx.user.role === "teacher") {
+          if (cls.teacherId !== ctx.user.id) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You are not the assigned teacher for this class." });
+          }
+        } else if (ctx.user.role === "student") {
+          if (await isStudentFeeRestricted(ctx.user.id)) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Access Restricted Due to Outstanding Fees." });
+          }
+
+          const profile = await db.query.profiles.findFirst({
+            where: eq(profiles.userId, ctx.user.id),
+          });
+          if (!profile || (profile.remainingGroupSessions ?? 0) <= 0) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You have exhausted your allocated Group sessions. Cannot join this class." });
+          }
+
+          const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, cls.id));
+          const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+          const enrollment = await db.query.batchEnrollments.findFirst({
+            where: and(
+              inArray(batchEnrollments.batchId, classBatchIds),
+              eq(batchEnrollments.studentId, ctx.user.id),
+              or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+            ),
+          });
+          if (!enrollment) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to join this class session." });
+          }
+
+          // Verify approved join request
+          const joinReq = await db.query.classJoinRequests.findFirst({
+            where: and(
+              eq(classJoinRequests.classId, cls.id),
+              eq(classJoinRequests.studentId, ctx.user.id)
+            ),
+          });
+          if (!joinReq || joinReq.status !== "approved") {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to join this class session. Request not approved." });
+          }
+        } else if (["admin", "academic_head"].includes(ctx.user.role)) {
+          // Allow admins view-only access (isModerator will be false)
+        } else {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Not authorized" });
+        }
+      }
+
+      // Generate unique meeting room ID if not set
+      let roomName = cls.meetingRoomId;
+      if (!roomName) {
+        const slug = cls.title.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase().substring(0, 50);
+        roomName = `emtees-${slug}-${cls.id}`;
+        await db.update(classes).set({ meetingRoomId: roomName, meetingUrl: `https://meet.jit.si/${roomName}` }).where(eq(classes.id, cls.id));
+      }
+
+      // Role determination - Stricter Jitsi moderator rules
+      const isModerator = ["super_admin", "teacher"].includes(ctx.user.role);
+
+      // JWT Generation if credentials configured
+      let jwt: string | null = null;
+      const jitsiAppId = process.env.JITSI_APP_ID;
+      const jitsiAppSecret = process.env.JITSI_APP_SECRET;
+      if (jitsiAppId && jitsiAppSecret) {
+        const userDetails = await db.query.users.findFirst({ where: eq(users.id, ctx.user.id) });
+        jwt = await generateJitsiToken({
+          room: roomName,
+          userName: ctx.user.name,
+          userEmail: userDetails?.email || undefined,
+          userId: String(ctx.user.id),
+          isModerator,
+          appId: jitsiAppId,
+          appSecret: jitsiAppSecret,
+        });
+      }
+
+      return {
+        classId: cls.id,
+        roomName,
+        jwt,
+        isModerator,
+        title: cls.title,
+        scheduledAt: cls.scheduledAt,
+        teacherName: cls.teacher?.name,
+      };
+    }),
+
+  create: authedQuery
+    .input(z.object({
+      batchIds: z.array(z.number()).min(1),
+      title: z.string().min(1),
+      description: z.string().optional(),
+      classType: z.enum(["group", "one_to_one"]).default("group"),
+      scheduledAt: z.date(),
+      duration: z.number().default(60),
+      teacherId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      // Stricter role permission check
+      const isSuperAdminOrTeacher = ["super_admin", "teacher"].includes(ctx.user.role);
+      if (!isSuperAdminOrTeacher) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only Super Admin and Teacher roles can schedule classes.",
+        });
+      }
+
+      // Teacher batch assignment check
+      if (ctx.user.role === "teacher") {
+        const targetBatches = await db.query.batches.findMany({
+          where: inArray(batches.id, input.batchIds),
+        });
+        
+        const invalidBatches = targetBatches.filter(b => b.teacherId !== ctx.user.id);
+        if (invalidBatches.length > 0 || targetBatches.length !== input.batchIds.length) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only schedule classes for batches assigned to you.",
+          });
+        }
+        
+        if (input.teacherId !== ctx.user.id) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only schedule classes with yourself as the assigned teacher.",
+          });
+        }
+      }
+
+      const slug = input.title.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase().substring(0, 50);
+      const roomName = `emtees-${slug}-${crypto.randomUUID().substring(0, 8)}`;
+      
+      const { batchIds, ...classValues } = input;
+      
+      // Save class with the first batchId for backward compatibility
+      const [newClass] = await db.insert(classes).values({
+        ...classValues,
+        batchId: batchIds[0],
+        meetingRoomId: roomName,
+        meetingUrl: `https://meet.jit.si/${roomName}`,
+      }).returning();
+
+      if (!newClass) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to schedule class.",
+        });
+      }
+
+      // Insert into classBatches join table
+      await db.insert(classBatches).values(
+        batchIds.map(bid => ({
+          classId: newClass.id,
+          batchId: bid
+        }))
+      );
+
+      // --- Notifications ---
+      const teacherUser = await db.query.users.findFirst({ where: eq(users.id, input.teacherId) });
+      const teacherName = teacherUser?.name || "Assigned Teacher";
+      const scheduledTimeStr = new Date(input.scheduledAt).toLocaleString();
+
+      // Fetch enrolled active students for all selected batch IDs
+      const enrollments = await db.query.batchEnrollments.findMany({
+        where: and(
+          inArray(batchEnrollments.batchId, batchIds),
+          eq(batchEnrollments.status, "active")
+        ),
+      });
+      const studentIds = Array.from(new Set(enrollments.map((e) => e.studentId)));
+
+      const notificationData = {
+        classId: newClass.id,
+        type: "class_scheduled",
+        scheduledAt: newClass.scheduledAt,
+      };
+
+      if (studentIds.length > 0) {
+        await sendBulkNotification(
+          studentIds,
+          `New Class Scheduled: ${input.title}`,
+          `Class "${input.title}" has been scheduled by ${teacherName} for ${scheduledTimeStr}.`,
+          "class_scheduled",
+          notificationData
+        );
+      }
+
+      await sendNotification(
+        input.teacherId,
+        `Class Scheduled: ${input.title}`,
+        `You are scheduled to teach "${input.title}" on ${scheduledTimeStr}.`,
+        "class_scheduled",
+        notificationData
+      );
+
+      return db.query.classes.findFirst({
+        where: eq(classes.id, newClass.id),
+        with: {
+          teacher: true,
+          classBatches: {
+            with: {
+              batch: true
+            }
+          }
+        }
+      });
+    }),
+
+  edit: authedQuery
+    .input(z.object({
+      id: z.number(),
+      batchIds: z.array(z.number()).min(1),
+      title: z.string().min(1),
+      description: z.string().optional(),
+      scheduledAt: z.date(),
+      duration: z.number().default(60),
+      teacherId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Stricter role check
+      const isSuperAdminOrTeacher = ["super_admin", "teacher"].includes(ctx.user.role);
+      if (!isSuperAdminOrTeacher) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only Super Admin and Teacher roles can edit classes.",
+        });
+      }
+
+      // If teacher, verify they are editing their own class
+      if (ctx.user.role === "teacher" && cls.teacherId !== ctx.user.id) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You are not authorized to edit this class.",
+        });
+      }
+
+      // If teacher, verify that all specified batchIds are taught by this teacher
+      if (ctx.user.role === "teacher") {
+        const targetBatches = await db.query.batches.findMany({
+          where: inArray(batches.id, input.batchIds),
+        });
+        const invalidBatches = targetBatches.filter(b => b.teacherId !== ctx.user.id);
+        if (invalidBatches.length > 0 || targetBatches.length !== input.batchIds.length) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only schedule classes for batches assigned to you.",
+          });
+        }
+        
+        if (input.teacherId !== ctx.user.id) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only edit classes with yourself as the assigned teacher.",
+          });
+        }
+      }
+
+      // Update classes table
+      const { batchIds, id, ...classValues } = input;
+      await db.update(classes)
+        .set({
+          ...classValues,
+          batchId: batchIds[0],
+        })
+        .where(eq(classes.id, id));
+
+      // Re-sync classBatches
+      await db.delete(classBatches).where(eq(classBatches.classId, id));
+      await db.insert(classBatches).values(
+        batchIds.map(bid => ({
+          classId: id,
+          batchId: bid
+        }))
+      );
+
+      return { success: true };
+    }),
+
+  start: authedQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isAssignedTeacher) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only Super Admin or the assigned Teacher can start this class.",
+        });
+      }
+
+      await db.update(classes)
+        .set({ status: "ongoing", startedAt: new Date() })
+        .where(eq(classes.id, input.id));
+
+      const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, input.id));
+      const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+      const enrollments = await db.query.batchEnrollments.findMany({
+        where: and(
+          inArray(batchEnrollments.batchId, classBatchIds),
+          eq(batchEnrollments.status, "active")
+        ),
+      });
+      const studentIds = Array.from(new Set(enrollments.map((e) => e.studentId)));
+      
+      const joinUrl = `/classes`;
+      const notificationData = {
+        classId: cls.id,
+        type: "class_start",
+        joinUrl
+      };
+
+      if (studentIds.length > 0) {
+        await sendBulkNotification(
+          studentIds,
+          "Class Started",
+          `Live class "${cls.title}" has started. Click here to join.`,
+          "class_start",
+          notificationData
+        );
+      }
+
+      const io = getIo();
+      if (io) {
+        for (const bid of classBatchIds) {
+          io.to(`batch:${bid}`).emit("class:started", {
+            batchId: bid,
+            classId: input.id,
+            title: cls.title,
+          });
+        }
+      }
+
+      return { success: true };
+    }),
+
+  end: authedQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isAssignedTeacher) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only Super Admin or the assigned Teacher can end this class.",
+        });
+      }
+
+      const endedAt = new Date();
+      const duration = cls.startedAt
+        ? Math.floor((endedAt.getTime() - new Date(cls.startedAt).getTime()) / 60000)
+        : 0;
+      await db.update(classes)
+        .set({ status: "completed", endedAt, duration })
+        .where(eq(classes.id, input.id));
+      return { success: true };
+    }),
+
+  cancel: authedQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isAssignedTeacher) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only Super Admin or the assigned Teacher can cancel this class.",
+        });
+      }
+
+      await db.update(classes)
+        .set({ status: "cancelled" })
+        .where(eq(classes.id, input.id));
+      return { success: true };
+    }),
+
+  // ─── One-to-One Sessions ─────────────────────────────────────────────────────
+
+  listOneToOne: authedQuery
+    .input(z.object({ studentId: z.number().optional(), teacherId: z.number().optional() }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const filters = [];
+      
+      if (ctx.user.role === "student") {
+        filters.push(eq(oneToOneSessions.studentId, ctx.user.id));
+      } else if (ctx.user.role === "teacher") {
+        filters.push(eq(oneToOneSessions.teacherId, ctx.user.id));
+      } else if (ctx.user.role === "super_admin") {
+        if (input?.studentId) filters.push(eq(oneToOneSessions.studentId, input.studentId));
+        if (input?.teacherId) filters.push(eq(oneToOneSessions.teacherId, input.teacherId));
+      } else {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Not authorized to list 1-to-1 sessions." });
+      }
+
+      const where = filters.length > 0 ? and(...filters) : undefined;
+      return db.query.oneToOneSessions.findMany({
+        where,
+        orderBy: desc(oneToOneSessions.scheduledAt),
+        with: { teacher: true, student: true, rescheduleRequests: true },
+      });
+    }),
+
+  createOneToOne: authedQuery
+    .input(z.object({
+      teacherId: z.number(),
+      studentId: z.number(),
+      title: z.string().min(1).default("1-to-1 Session"),
+      sessionLength: z.number().default(30),
+      scheduledAt: z.date(),
+      remarks: z.string().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "super_admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can create 1-to-1 sessions." });
+      }
+      const db = getDb();
+
+      const profile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, input.studentId),
+      });
+      if (!profile || (profile.remainingOneToOneSessions ?? 0) <= 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Student has exhausted their allocated One-to-One sessions. Cannot schedule a new session.",
+        });
+      }
+
+      const validUntil = new Date(input.scheduledAt);
+      validUntil.setDate(validUntil.getDate() + 60);
+
+      // Generate unique meeting room ID
+      const slug = input.title.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase().substring(0, 50);
+      const meetingRoomId = `emtees-1to1-${slug}-${Date.now()}`;
+      const meetingUrl = `https://meet.jit.si/${meetingRoomId}`;
+
+      const result = await db.insert(oneToOneSessions).values({
+        teacherId: input.teacherId,
+        studentId: input.studentId,
+        title: input.title,
+        sessionLength: input.sessionLength,
+        scheduledAt: input.scheduledAt,
+        remarks: input.remarks,
+        createdBy: ctx.user.id,
+        validFrom: input.scheduledAt,
+        validUntil,
+        meetingRoomId,
+        meetingUrl,
+        status: "scheduled",
+      }).returning({ id: oneToOneSessions.id });
+
+      const newSession = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, result[0]?.id),
+        with: { teacher: true, student: true },
+      });
+
+      if (newSession) {
+        const timeStr = new Date(input.scheduledAt).toLocaleString();
+        
+        await sendNotification(
+          input.studentId,
+          `New 1-to-1 Session Scheduled: ${input.title}`,
+          `A 1-to-1 session "${input.title}" has been scheduled with Teacher ${newSession.teacher?.name || "assigned"} on ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: newSession.id }
+        );
+
+        await sendNotification(
+          input.teacherId,
+          `New 1-to-1 Session Scheduled: ${input.title}`,
+          `A 1-to-1 session "${input.title}" has been scheduled with Student ${newSession.student?.name || "assigned"} on ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: newSession.id }
+        );
+      }
+
+      return newSession;
+    }),
+
+  editOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+      teacherId: z.number(),
+      studentId: z.number(),
+      title: z.string().min(1),
+      sessionLength: z.number(),
+      scheduledAt: z.date(),
+      remarks: z.string().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "super_admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can edit 1-to-1 sessions." });
+      }
+      const db = getDb();
+      const oldSession = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!oldSession) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      const validUntil = new Date(input.scheduledAt);
+      validUntil.setDate(validUntil.getDate() + 60);
+
+      const timeChanged = oldSession.scheduledAt.getTime() !== input.scheduledAt.getTime();
+
+      await db.update(oneToOneSessions).set({
+        teacherId: input.teacherId,
+        studentId: input.studentId,
+        title: input.title,
+        sessionLength: input.sessionLength,
+        scheduledAt: input.scheduledAt,
+        remarks: input.remarks,
+        validFrom: input.scheduledAt,
+        validUntil,
+      }).where(eq(oneToOneSessions.id, input.sessionId));
+
+      const updatedSession = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+        with: { teacher: true, student: true },
+      });
+
+      if (updatedSession && timeChanged) {
+        const timeStr = new Date(input.scheduledAt).toLocaleString();
+        
+        await sendNotification(
+          input.studentId,
+          `1-to-1 Session Updated: ${input.title}`,
+          `Your 1-to-1 session "${input.title}" details have been updated. New scheduled time: ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: updatedSession.id }
+        );
+
+        await sendNotification(
+          input.teacherId,
+          `1-to-1 Session Updated: ${input.title}`,
+          `Your 1-to-1 session "${input.title}" details have been updated. New scheduled time: ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: updatedSession.id }
+        );
+      }
+
+      return updatedSession;
+    }),
+
+  rescheduleOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+      scheduledAt: z.date(),
+      sessionLength: z.number().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "super_admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can reschedule 1-to-1 sessions." });
+      }
+      const db = getDb();
+      const oldSession = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!oldSession) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      const validUntil = new Date(input.scheduledAt);
+      validUntil.setDate(validUntil.getDate() + 60);
+
+      await db.update(oneToOneSessions).set({
+        scheduledAt: input.scheduledAt,
+        sessionLength: input.sessionLength ?? oldSession.sessionLength,
+        status: "rescheduled",
+        validFrom: input.scheduledAt,
+        validUntil,
+        reminder1DaySentAt: null,
+        reminder1HourSentAt: null,
+        reminder10MinSentAt: null,
+      }).where(eq(oneToOneSessions.id, input.sessionId));
+
+      const updatedSession = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+        with: { teacher: true, student: true },
+      });
+
+      if (updatedSession) {
+        const timeStr = new Date(input.scheduledAt).toLocaleString();
+        
+        await sendNotification(
+          updatedSession.studentId,
+          `1-to-1 Session Rescheduled: ${updatedSession.title}`,
+          `Your 1-to-1 session "${updatedSession.title}" has been rescheduled to ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: updatedSession.id }
+        );
+
+        await sendNotification(
+          updatedSession.teacherId,
+          `1-to-1 Session Rescheduled: ${updatedSession.title}`,
+          `Your 1-to-1 session "${updatedSession.title}" has been rescheduled to ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: updatedSession.id }
+        );
+      }
+
+      return updatedSession;
+    }),
+
+  cancelOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "super_admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can cancel 1-to-1 sessions." });
+      }
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      await db.update(oneToOneSessions).set({
+        status: "cancelled",
+      }).where(eq(oneToOneSessions.id, input.sessionId));
+
+      // Notify Student of cancellation
+      await sendNotification(
+        session.studentId,
+        `1-to-1 Session Cancelled: ${session.title}`,
+        `Your 1-to-1 session "${session.title}" has been cancelled.`,
+        "class_cancelled",
+        { sessionId: session.id }
+      );
+
+      // Notify Teacher of cancellation
+      await sendNotification(
+        session.teacherId,
+        `1-to-1 Session Cancelled: ${session.title}`,
+        `Your 1-to-1 session "${session.title}" has been cancelled.`,
+        "class_cancelled",
+        { sessionId: session.id }
+      );
+
+      return { success: true };
+    }),
+
+  requestReschedule: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+      proposedScheduledAt: z.date(),
+      reason: z.string().min(1),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "teacher") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Teachers can request rescheduling." });
+      }
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      if (session.teacherId !== ctx.user.id) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only request rescheduling for sessions assigned to you." });
+      }
+
+      if (new Date() >= new Date(session.scheduledAt)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot request rescheduling after the session start time." });
+      }
+
+      // Check for existing pending request
+      const existingPending = await db.query.oneToOneRescheduleRequests.findFirst({
+        where: and(
+          eq(oneToOneRescheduleRequests.sessionId, input.sessionId),
+          eq(oneToOneRescheduleRequests.status, "pending")
+        )
+      });
+      if (existingPending) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "A rescheduling request is already pending for this session." });
+      }
+
+      await db.update(oneToOneSessions)
+        .set({ status: "reschedule_request_pending" })
+        .where(eq(oneToOneSessions.id, input.sessionId));
+
+      const [newRequest] = await db.insert(oneToOneRescheduleRequests).values({
+        sessionId: input.sessionId,
+        previousScheduledAt: session.scheduledAt,
+        proposedScheduledAt: input.proposedScheduledAt,
+        reason: input.reason,
+        status: "pending",
+        requestedBy: ctx.user.id,
+      }).returning();
+
+      // Notify Super Admins and Admins
+      const adminIds = await getAdminUserIds();
+      if (adminIds.length > 0) {
+        const timeStr = new Date(input.proposedScheduledAt).toLocaleString();
+        const origTimeStr = new Date(session.scheduledAt).toLocaleString();
+        await sendBulkNotification(
+          adminIds,
+          `Reschedule Request: ${session.title}`,
+          `Teacher ${ctx.user.name} has requested to reschedule "${session.title}" (originally on ${origTimeStr}) to ${timeStr}. Reason: ${input.reason}`,
+          "reschedule_request_submitted",
+          { requestId: newRequest.id, sessionId: session.id }
+        );
+      }
+
+      return newRequest;
+    }),
+
+  listRescheduleRequests: authedQuery
+    .input(z.object({
+      status: z.enum(["pending", "approved", "rejected", "cancelled"]).optional(),
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const isAdmin = ["super_admin", "admin"].includes(ctx.user.role);
+      const isTeacher = ctx.user.role === "teacher";
+
+      if (!isAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Not authorized to view reschedule requests." });
+      }
+
+      const filters = [];
+      if (input?.status) {
+        filters.push(eq(oneToOneRescheduleRequests.status, input.status));
+      }
+      if (isTeacher) {
+        filters.push(eq(oneToOneRescheduleRequests.requestedBy, ctx.user.id));
+      }
+
+      const where = filters.length > 0 ? and(...filters) : undefined;
+      return db.query.oneToOneRescheduleRequests.findMany({
+        where,
+        orderBy: desc(oneToOneRescheduleRequests.requestedAt),
+        with: {
+          session: {
+            with: { teacher: true, student: true }
+          },
+          requestedByUser: true,
+          resolvedByUser: true,
+        }
+      });
+    }),
+
+  resolveRescheduleRequest: authedQuery
+    .input(z.object({
+      requestId: z.number(),
+      status: z.enum(["approved", "rejected"]),
+      proposedScheduledAt: z.date().optional(),
+      adminRemarks: z.string().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (!["super_admin", "admin"].includes(ctx.user.role)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins can approve or reject reschedule requests." });
+      }
+      const db = getDb();
+      const request = await db.query.oneToOneRescheduleRequests.findFirst({
+        where: eq(oneToOneRescheduleRequests.id, input.requestId),
+        with: {
+          session: true,
+        }
+      });
+      if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Reschedule request not found" });
+      if (request.status !== "pending") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This request has already been resolved." });
+      }
+
+      // Update the request status and remarks
+      await db.update(oneToOneRescheduleRequests).set({
+        status: input.status,
+        adminRemarks: input.adminRemarks ?? null,
+        resolvedAt: new Date(),
+        resolvedBy: ctx.user.id,
+      }).where(eq(oneToOneRescheduleRequests.id, input.requestId));
+
+      const session = request.session;
+
+      if (input.status === "approved") {
+        const finalTime = input.proposedScheduledAt || request.proposedScheduledAt;
+        const validUntil = new Date(finalTime);
+        validUntil.setDate(validUntil.getDate() + 60);
+
+        // Update the 1-to-1 session itself
+        await db.update(oneToOneSessions).set({
+          scheduledAt: finalTime,
+          status: "rescheduled",
+          validFrom: finalTime,
+          validUntil,
+          reminder1DaySentAt: null,
+          reminder1HourSentAt: null,
+          reminder10MinSentAt: null,
+        }).where(eq(oneToOneSessions.id, session.id));
+
+        const timeStr = new Date(finalTime).toLocaleString();
+
+        // Notify Student and Teacher
+        await sendNotification(
+          session.studentId,
+          `1-to-1 Session Rescheduled: ${session.title}`,
+          `Your 1-to-1 session "${session.title}" has been rescheduled to ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: session.id }
+        );
+
+        await sendNotification(
+          session.teacherId,
+          `Reschedule Approved: ${session.title}`,
+          `Your request to reschedule 1-to-1 session "${session.title}" has been approved. New time: ${timeStr}.`,
+          "class_scheduled",
+          { sessionId: session.id }
+        );
+      } else {
+        // Update the 1-to-1 session status back to scheduled
+        await db.update(oneToOneSessions).set({
+          status: "scheduled",
+        }).where(eq(oneToOneSessions.id, session.id));
+
+        // Notify Student of rejection
+        await sendNotification(
+          session.studentId,
+          `Reschedule Rejected: ${session.title}`,
+          `The request to reschedule your 1-to-1 session "${session.title}" has been rejected.`,
+          "reschedule_request_rejected",
+          { sessionId: session.id }
+        );
+
+        // Notify Teacher of rejection
+        await sendNotification(
+          session.teacherId,
+          `Reschedule Rejected: ${session.title}`,
+          `Your request to reschedule 1-to-1 session "${session.title}" has been rejected. Remarks: ${input.adminRemarks || "None"}`,
+          "reschedule_request_rejected",
+          { sessionId: session.id }
+        );
+      }
+
+      return { success: true };
+    }),
+
+  startOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && session.teacherId === ctx.user.id;
+
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to start this session." });
+      }
+
+      const startedAt = new Date();
+      const updateData: any = {
+        status: "ongoing",
+        startedAt,
+      };
+
+      if (isTeacher) {
+        updateData.teacherAttendance = "present";
+      }
+
+      await db.update(oneToOneSessions).set(updateData).where(eq(oneToOneSessions.id, input.sessionId));
+
+      await sendNotification(
+        session.studentId,
+        `1-to-1 Session Started: ${session.title}`,
+        `Your session "${session.title}" has started. Join now!`,
+        "class_started",
+        { sessionId: session.id }
+      );
+
+      return { success: true };
+    }),
+
+  joinOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+        with: { teacher: true, student: true },
+      });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && session.teacherId === ctx.user.id;
+      const isStudent = ctx.user.role === "student" && session.studentId === ctx.user.id;
+
+      if (!isSuperAdmin && !isTeacher && !isStudent) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to join this session." });
+      }
+
+      if (isStudent) {
+        if (session.status !== "ongoing") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Class has not started yet. Please wait for the teacher to start the session." });
+        }
+        await db.update(oneToOneSessions)
+          .set({ studentAttendance: "present" })
+          .where(eq(oneToOneSessions.id, input.sessionId));
+      }
+
+      if (isTeacher) {
+        await db.update(oneToOneSessions)
+          .set({ teacherAttendance: "present" })
+          .where(eq(oneToOneSessions.id, input.sessionId));
+      }
+
+      const roomName = session.meetingRoomId || `emtees-1to1-${session.id}`;
+      const isModerator = ["super_admin", "teacher"].includes(ctx.user.role);
+
+      let jwt: string | null = null;
+      const jitsiAppId = process.env.JITSI_APP_ID;
+      const jitsiAppSecret = process.env.JITSI_APP_SECRET;
+      if (jitsiAppId && jitsiAppSecret) {
+        const userDetails = await db.query.users.findFirst({ where: eq(users.id, ctx.user.id) });
+        jwt = await generateJitsiToken({
+          room: roomName,
+          userName: ctx.user.name,
+          userEmail: userDetails?.email || undefined,
+          userId: String(ctx.user.id),
+          isModerator,
+          appId: jitsiAppId,
+          appSecret: jitsiAppSecret,
+        });
+      }
+
+      return {
+        sessionId: session.id,
+        roomName,
+        jwt,
+        isModerator,
+        title: session.title,
+        scheduledAt: session.scheduledAt,
+        teacherName: session.teacher?.name,
+      };
+    }),
+
+  endOneToOne: authedQuery
+    .input(z.object({
+      sessionId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && session.teacherId === ctx.user.id;
+
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to end this session." });
+      }
+
+      const endedAt = new Date();
+      const startedAt = session.startedAt || session.scheduledAt;
+      const actualDuration = Math.round((endedAt.getTime() - startedAt.getTime()) / 60000);
+
+      const teacherAttendance = session.teacherAttendance || "absent";
+      const studentAttendance = session.studentAttendance || "absent";
+
+      await db.update(oneToOneSessions).set({
+        status: "completed",
+        endedAt,
+        actualDuration: actualDuration > 0 ? actualDuration : 0,
+        teacherAttendance,
+        studentAttendance,
+        completedAt: endedAt,
+      }).where(eq(oneToOneSessions.id, input.sessionId));
+
+      await updateStudentSessionBalances(db, session.studentId);
+
+      return { success: true };
+    }),
+
+  // Task 11.1 — complete a one-to-one session with duration validation
+  completeOneToOne: teacherQuery
+    .input(z.object({
+      sessionId: z.number(),
+      actualDurationMinutes: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const session = await db.query.oneToOneSessions.findFirst({
+        where: eq(oneToOneSessions.id, input.sessionId),
+      });
+      if (!session) throw new Error("Session not found");
+      if (session.teacherId !== ctx.user.id) throw new Error("Not authorized");
+
+      const { sessionLength, actualDurationMinutes: dur } = { ...session, actualDurationMinutes: input.actualDurationMinutes };
+
+      let valid = false;
+      if (sessionLength === 30) {
+        valid = dur >= 25 && dur <= 40;
+      } else if (sessionLength === 45) {
+        valid = dur >= 35 && dur <= 60;
+      } else {
+        // For other lengths, accept within ±20% tolerance
+        valid = dur >= sessionLength * 0.8 && dur <= sessionLength * 1.5;
+      }
+
+      if (!valid) {
+        throw new Error(
+          `Duration ${dur} min is outside the acceptable range for a ${sessionLength}-min session.`,
+        );
+      }
+
+      await db.update(oneToOneSessions)
+        .set({ status: "completed", completedAt: new Date() })
+        .where(eq(oneToOneSessions.id, input.sessionId));
+
+      await updateStudentSessionBalances(db, session.studentId);
+
+      return { success: true };
+    }),
+
+  // Task 11.3 — update/delete session recording (admin-only)
+  updateSessionRecording: adminQuery
+    .input(z.object({
+      sessionId: z.number(),
+      recordingUrl: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      await db.update(oneToOneSessions)
+        .set({ recordingUrl: input.recordingUrl })
+        .where(eq(oneToOneSessions.id, input.sessionId));
+      return { success: true };
+    }),
+
+  deleteSessionRecording: adminQuery
+    .input(z.object({ sessionId: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      await db.update(oneToOneSessions)
+        .set({ recordingUrl: null, recordingDeletedAt: new Date() })
+        .where(eq(oneToOneSessions.id, input.sessionId));
+      return { success: true };
+    }),
+
+  // Task 11.5 — student session summary
+  mySessionSummary: authedQuery.query(async ({ ctx }) => {
+    const db = getDb();
+    const allSessions = await db.query.oneToOneSessions.findMany({
+      where: eq(oneToOneSessions.studentId, ctx.user.id),
+    });
+    const completed = allSessions.filter((s) => s.status === "completed").length;
+    const total = allSessions.length;
+    return { completed, remaining: total - completed };
+  }),
+
+  // Task 11.6 — teacher session summary
+  teacherSessionSummary: teacherQuery
+    .input(z.object({ teacherId: z.number().optional() }))
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const teacherId = input?.teacherId ?? ctx.user.id;
+      const allSessions = await db.query.oneToOneSessions.findMany({
+        where: eq(oneToOneSessions.teacherId, teacherId),
+      });
+      const totalHandled = allSessions.filter((s) => s.status === "completed").length;
+      // Earnings calculation: return 0 until rate configuration is available
+      const totalEarnings = 0;
+      return { totalHandled, totalEarnings };
+    }),
+
+  // ─── Attendance ──────────────────────────────────────────────────────────────
+
+  getAttendance: teacherQuery
+    .input(z.object({ classId: z.number() }))
+    .query(async ({ input }) => {
+      const db = getDb();
+      return db.query.attendance.findMany({
+        where: eq(attendance.classId, input.classId),
+        with: { student: true },
+      });
+    }),
+
+  recordAttendance: teacherQuery
+    .input(z.object({
+      classId: z.number(),
+      studentId: z.number(),
+      chatCount: z.number().default(0),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const status = input.chatCount >= 4 ? "present" : "absent";
+      const existing = await db.query.attendance.findFirst({
+        where: and(eq(attendance.classId, input.classId), eq(attendance.studentId, input.studentId)),
+      });
+
+      if (existing) {
+        await db.update(attendance)
+          .set({ chatCount: input.chatCount, status })
+          .where(eq(attendance.id, existing.id));
+      } else {
+        await db.insert(attendance).values({
+          classId: input.classId,
+          studentId: input.studentId,
+          chatCount: input.chatCount,
+          status,
+        });
+      }
+
+      if (status === "present") {
+        const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.classId) });
+        if (cls) {
+          await db.update(attendanceAlerts)
+            .set({ status: "resolved", resolvedAt: new Date() })
+            .where(and(
+              eq(attendanceAlerts.studentId, input.studentId),
+              eq(attendanceAlerts.batchId, cls.batchId),
+              eq(attendanceAlerts.status, "active")
+            ));
+        }
+      }
+
+      // Check for 7 consecutive absences
+      const last7 = await db.query.attendance.findMany({
+        where: eq(attendance.studentId, input.studentId),
+        orderBy: desc(attendance.recordedAt),
+        limit: 7,
+      });
+      if (last7.length === 7 && last7.every((r) => r.status === "absent")) {
+        const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.classId) });
+        if (cls) {
+          const batch = await db.query.batches.findFirst({ where: eq(batches.id, cls.batchId) });
+          const adminIds = await getAdminUserIds();
+          await sendNotification(input.studentId, "Absence Alert", "You have been absent for 7 consecutive classes", "absence_alert");
+          if (batch?.teacherId) {
+            await sendNotification(batch.teacherId, "Student Absence Alert", `A student has been absent for 7 consecutive classes`, "absence_alert");
+          }
+          if (adminIds.length > 0) {
+            await sendBulkNotification(adminIds, "Student Absence Alert", `A student has been absent for 7 consecutive classes`, "absence_alert");
+          }
+        }
+      }
+
+      // Task 17.1 — attendance streak badge (feature-flagged)
+      if (process.env.FEATURE_GAMIFICATION === "true" && status === "present") {
+        const recentAttendance = await db.query.attendance.findMany({
+          where: eq(attendance.studentId, input.studentId),
+          orderBy: desc(attendance.recordedAt),
+          limit: 30,
+        });
+
+        // Count consecutive present records from the most recent
+        let streak = 0;
+        for (const record of recentAttendance) {
+          if (record.status === "present") {
+            streak++;
+          } else {
+            break;
+          }
+        }
+
+        if (streak === 7 || streak === 30) {
+          const badgeLabel = streak === 7 ? "7-Day Streak" : "30-Day Streak";
+          const profile = await db.query.profiles.findFirst({
+            where: eq(profiles.userId, input.studentId),
+          });
+          if (profile) {
+            const timeline = Array.isArray(profile.activityTimeline) ? profile.activityTimeline : [];
+            timeline.push({
+              type: "badge",
+              badge: badgeLabel,
+              timestamp: new Date().toISOString(),
+            });
+            await db.update(profiles)
+              .set({ activityTimeline: timeline })
+              .where(eq(profiles.userId, input.studentId));
+          }
+        }
+      }
+
+      await updateStudentSessionBalances(db, input.studentId);
+
+      return { success: true, status };
+    }),
+
+  myAttendance: authedQuery.query(async ({ ctx }) => {
+    const db = getDb();
+    return db.query.attendance.findMany({
+      where: eq(attendance.studentId, ctx.user.id),
+      with: { class: true },
+    });
+  }),
+
+  recordJoinTime: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new Error("Class not found");
+
+      // Verify student is enrolled in any batch linked to this class
+      if (ctx.user.role === "student") {
+        if (await isStudentFeeRestricted(ctx.user.id)) {
+          throw new Error("Access Restricted Due to Outstanding Fees.");
+        }
+
+        const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, cls.id));
+        const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+        const enrollment = await db.query.batchEnrollments.findFirst({
+          where: and(
+            inArray(batchEnrollments.batchId, classBatchIds),
+            eq(batchEnrollments.studentId, ctx.user.id),
+            or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+          ),
+        });
+        if (!enrollment) {
+          throw new Error("You are not authorized to join this class session.");
+        }
+
+        // Verify approved join request
+        const joinReq = await db.query.classJoinRequests.findFirst({
+          where: and(
+            eq(classJoinRequests.classId, cls.id),
+            eq(classJoinRequests.studentId, ctx.user.id)
+          ),
+        });
+        if (!joinReq || joinReq.status !== "approved") {
+          throw new Error("You are not authorized to join this class session. Request not approved.");
+        }
+      }
+
+      // Record join time
+      const existing = await db.query.attendance.findFirst({
+        where: and(eq(attendance.classId, input.classId), eq(attendance.studentId, ctx.user.id)),
+      });
+
+      if (existing) {
+        await db.update(attendance)
+          .set({ joinedAt: new Date(), status: "present" })
+          .where(eq(attendance.id, existing.id));
+      } else {
+        await db.insert(attendance).values({
+          classId: input.classId,
+          studentId: ctx.user.id,
+          joinedAt: new Date(),
+          status: "present",
+        });
+      }
+
+      // Resolve active attendance alerts on class join
+      if (cls) {
+        const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, cls.id));
+        const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+        await db.update(attendanceAlerts)
+          .set({ status: "resolved", resolvedAt: new Date() })
+          .where(and(
+            eq(attendanceAlerts.studentId, ctx.user.id),
+            inArray(attendanceAlerts.batchId, classBatchIds),
+            eq(attendanceAlerts.status, "active")
+          ));
+      }
+
+      await updateStudentSessionBalances(db, ctx.user.id);
+
+      return { success: true };
+    }),
+
+  getJoinStatus: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      if (["super_admin", "teacher", "admin", "academic_head"].includes(ctx.user.role)) {
+        return {
+          isEnrolled: true,
+          status: "approved" as const,
+          meetingRoomId: cls.meetingRoomId,
+        };
+      }
+
+      const isRestricted = ctx.user.role === "student" ? await isStudentFeeRestricted(ctx.user.id) : false;
+      if (isRestricted) {
+        return {
+          isEnrolled: false,
+          status: "none" as const,
+          meetingRoomId: null,
+        };
+      }
+
+      // Check batch enrollment
+      const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, cls.id));
+      const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+      const enrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          inArray(batchEnrollments.batchId, classBatchIds),
+          eq(batchEnrollments.studentId, ctx.user.id),
+          or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+        ),
+      });
+
+      if (!enrollment) {
+        return {
+          isEnrolled: false,
+          status: "none" as const,
+          meetingRoomId: null,
+        };
+      }
+
+      const reqRecord = await db.query.classJoinRequests.findFirst({
+        where: and(
+          eq(classJoinRequests.classId, cls.id),
+          eq(classJoinRequests.studentId, ctx.user.id)
+        ),
+      });
+
+      return {
+        isEnrolled: true,
+        status: (reqRecord?.status || "none") as "pending" | "approved" | "declined" | "none",
+        meetingRoomId: cls.meetingRoomId,
+      };
+    }),
+
+  requestJoin: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      if (ctx.user.role === "student") {
+        if (await isStudentFeeRestricted(ctx.user.id)) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Access Restricted Due to Outstanding Fees." });
+        }
+
+        const profile = await db.query.profiles.findFirst({
+          where: eq(profiles.userId, ctx.user.id),
+        });
+        if (!profile || (profile.remainingGroupSessions ?? 0) <= 0) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You have exhausted your allocated Group sessions. Cannot join this class.",
+          });
+        }
+      }
+
+      // Verify batch enrollment
+      const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, cls.id));
+      const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+      const enrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          inArray(batchEnrollments.batchId, classBatchIds),
+          eq(batchEnrollments.studentId, ctx.user.id),
+          or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+        ),
+      });
+      if (!enrollment) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You are not enrolled in any batch linked to this class." });
+      }
+
+      // Upsert request
+      const existing = await db.query.classJoinRequests.findFirst({
+        where: and(
+          eq(classJoinRequests.classId, input.classId),
+          eq(classJoinRequests.studentId, ctx.user.id)
+        ),
+      });
+
+      if (existing) {
+        await db.update(classJoinRequests)
+          .set({ status: "pending", updatedAt: new Date() })
+          .where(eq(classJoinRequests.id, existing.id));
+      } else {
+        await db.insert(classJoinRequests).values({
+          classId: input.classId,
+          studentId: ctx.user.id,
+          status: "pending",
+        });
+      }
+
+      // Retrieve student details for real-time notification
+      const student = await db.query.users.findFirst({
+        where: eq(users.id, ctx.user.id),
+      });
+
+      // Emit to class room so host/teacher receives notification instantly
+      const io = getIo();
+      if (io) {
+        io.to(`class:${input.classId}`).emit("class:join_request_new", {
+          classId: input.classId,
+          studentId: ctx.user.id,
+          studentName: student?.name || "Unknown Student",
+          studentUnionId: student?.unionId || "",
+          status: "pending",
+        });
+      }
+
+      return { success: true, status: "pending" as const };
+    }),
+
+  listJoinRequests: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Only super_admin or assigned teacher can list requests
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only class hosts can view join requests." });
+      }
+
+      // Fetch requests along with student details
+      const list = await db.query.classJoinRequests.findMany({
+        where: eq(classJoinRequests.classId, input.classId),
+        orderBy: desc(classJoinRequests.createdAt),
+        with: {
+          student: true,
+        },
+      });
+
+      return list.map(req => ({
+        id: req.id,
+        classId: req.classId,
+        studentId: req.studentId,
+        status: req.status,
+        createdAt: req.createdAt,
+        studentName: req.student?.name || "Unknown Student",
+        studentUnionId: req.student?.unionId || "",
+      }));
+    }),
+
+  approveJoinRequest: authedQuery
+    .input(z.object({ classId: z.number(), studentId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Permission check
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only class hosts can approve requests." });
+      }
+
+      await db.update(classJoinRequests)
+        .set({ status: "approved", updatedAt: new Date() })
+        .where(and(
+          eq(classJoinRequests.classId, input.classId),
+          eq(classJoinRequests.studentId, input.studentId)
+        ));
+
+      // Emit sockets
+      const io = getIo();
+      if (io) {
+        // Notify student personal room
+        io.to(`user:${input.studentId}`).emit("class:join_request_status", {
+          classId: input.classId,
+          status: "approved",
+        });
+
+        // Notify class room for state sync
+        io.to(`class:${input.classId}`).emit("class:join_request_updated", {
+          studentId: input.studentId,
+          status: "approved",
+        });
+      }
+
+      return { success: true };
+    }),
+
+  declineJoinRequest: authedQuery
+    .input(z.object({ classId: z.number(), studentId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Permission check
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only class hosts can decline requests." });
+      }
+
+      await db.update(classJoinRequests)
+        .set({ status: "declined", updatedAt: new Date() })
+        .where(and(
+          eq(classJoinRequests.classId, input.classId),
+          eq(classJoinRequests.studentId, input.studentId)
+        ));
+
+      // Emit sockets
+      const io = getIo();
+      if (io) {
+        // Notify student personal room
+        io.to(`user:${input.studentId}`).emit("class:join_request_status", {
+          classId: input.classId,
+          status: "declined",
+        });
+
+        // Notify class room for state sync
+        io.to(`class:${input.classId}`).emit("class:join_request_updated", {
+          studentId: input.studentId,
+          status: "declined",
+        });
+      }
+
+      return { success: true };
+    }),
+
+  approveAllJoinRequests: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      // Permission check
+      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
+      if (!isSuperAdmin && !isTeacher) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only class hosts can approve requests." });
+      }
+
+      // Fetch all pending requests
+      const pendings = await db.query.classJoinRequests.findMany({
+        where: and(
+          eq(classJoinRequests.classId, input.classId),
+          eq(classJoinRequests.status, "pending")
+        ),
+      });
+
+      if (pendings.length > 0) {
+        const studentIds = pendings.map(p => p.studentId);
+
+        await db.update(classJoinRequests)
+          .set({ status: "approved", updatedAt: new Date() })
+          .where(and(
+            eq(classJoinRequests.classId, input.classId),
+            inArray(classJoinRequests.studentId, studentIds)
+          ));
+
+        const io = getIo();
+        if (io) {
+          // Notify each student personal room
+          for (const sId of studentIds) {
+            io.to(`user:${sId}`).emit("class:join_request_status", {
+              classId: input.classId,
+              status: "approved",
+            });
+          }
+
+          // Notify class room
+          io.to(`class:${input.classId}`).emit("class:join_request_updated_all", {
+            classId: input.classId,
+            status: "approved",
+          });
+        }
+      }
+
+      return { success: true };
+    }),
+
+  recordLeaveTime: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const existing = await db.query.attendance.findFirst({
+        where: and(eq(attendance.classId, input.classId), eq(attendance.studentId, ctx.user.id)),
+      });
+
+      if (existing) {
+        const now = new Date();
+        const joinTime = existing.joinedAt ? new Date(existing.joinedAt) : null;
+        const sessionDuration = joinTime
+          ? Math.max(0, Math.floor((now.getTime() - joinTime.getTime()) / 1000))
+          : 0;
+
+        await db.update(attendance)
+          .set({
+            leftAt: now,
+            duration: (existing.duration || 0) + sessionDuration,
+          })
+          .where(eq(attendance.id, existing.id));
+      }
+
+      return { success: true };
+    }),
+
+  listAttendanceAlerts: teacherQuery
+    .input(
+      z.object({
+        status: z.enum(["active", "resolved", "all"]).default("active"),
+        batchId: z.number().optional(),
+        search: z.string().optional(),
+      })
+    )
+    .query(async ({ input, ctx }) => {
+      if (["academic_head", "student"].includes(ctx.user.role)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Access Denied",
+        });
+      }
+
+      const db = getDb();
+      const user = ctx.user;
+
+      const filters: any[] = [];
+
+      // Filter by status
+      if (input.status === "active") {
+        filters.push(eq(attendanceAlerts.status, "active"));
+      } else if (input.status === "resolved") {
+        filters.push(eq(attendanceAlerts.status, "resolved"));
+      }
+
+      // Filter by batchId
+      if (input.batchId) {
+        filters.push(eq(attendanceAlerts.batchId, input.batchId));
+      }
+
+      // If the caller is a teacher, restrict to their batches
+      if (user.role === "teacher") {
+        const teacherBatches = await db
+          .select({ id: batches.id })
+          .from(batches)
+          .where(eq(batches.teacherId, user.id));
+        const batchIds = teacherBatches.map((b) => b.id);
+        if (batchIds.length === 0) {
+          return [];
+        }
+        filters.push(inArray(attendanceAlerts.batchId, batchIds));
+      }
+
+      // If search is provided, we filter by student name, username, or unionId
+      if (input.search) {
+        const matchingStudents = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            and(
+              eq(users.role, "student"),
+              or(
+                ilike(users.name, "%" + input.search + "%"),
+                ilike(users.username, "%" + input.search + "%"),
+                ilike(users.unionId, "%" + input.search + "%")
+              )
+            )
+          );
+        const studentIds = matchingStudents.map((s) => s.id);
+        if (studentIds.length === 0) {
+          return [];
+        }
+        filters.push(inArray(attendanceAlerts.studentId, studentIds));
+      }
+
+      // Fetch alerts with relations
+      const list = await db.query.attendanceAlerts.findMany({
+        where: and(...filters),
+        orderBy: desc(attendanceAlerts.createdAt),
+        with: {
+          student: true,
+          batch: {
+            with: {
+              teacher: true,
+            },
+          },
+        },
+      });
+
+      return list;
+    }),
+});

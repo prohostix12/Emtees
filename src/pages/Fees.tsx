@@ -1,0 +1,918 @@
+import { useState } from "react";
+import { trpc } from "@/providers/trpc";
+import { useAuth } from "@/hooks/useAuth";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { toast } from "sonner";
+import {
+  Plus,
+  CreditCard,
+  CheckCircle,
+  AlertCircle,
+  Wallet,
+  Printer,
+  Calendar,
+  Download,
+  Send,
+  Sliders,
+} from "lucide-react";
+
+export default function FeesPage() {
+  const { user } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [selectedBatchFilter, setSelectedBatchFilter] = useState<string>("all");
+  const [selectedDueDateFilter, setSelectedDueDateFilter] = useState<string>("");
+
+  const isAdmin = ["super_admin", "admin", "academic_head"].includes(user?.role || "");
+
+  // TRPC queries and mutations
+  const paymentsQuery = trpc.admin.listPayments.useQuery(
+    isAdmin
+      ? {
+          status: statusFilter !== "all" ? statusFilter : undefined,
+          batchId: selectedBatchFilter !== "all" ? Number(selectedBatchFilter) : undefined,
+          dueDate: selectedDueDateFilter ? new Date(selectedDueDateFilter) : undefined,
+        }
+      : undefined,
+    { enabled: isAdmin }
+  );
+
+  const myPayments = trpc.student.myPayments.useQuery(
+    undefined,
+    { enabled: !isAdmin && !!user?.id }
+  );
+
+  const myProfile = trpc.user.myProfile.useQuery(undefined, { enabled: !isAdmin });
+  const overdueQuery = trpc.admin.listOverdueStudents.useQuery(undefined, { enabled: isAdmin });
+  const batchesQuery = trpc.learning.listBatches.useQuery(undefined, { enabled: isAdmin });
+
+  const createPayment = trpc.admin.createPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Payment record created");
+      setOpen(false);
+      paymentsQuery.refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const recordPayment = trpc.admin.recordPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Payment recorded");
+      paymentsQuery.refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const sendManualReminder = trpc.admin.sendManualReminder.useMutation({
+    onSuccess: () => {
+      toast.success("Manual reminder notification sent to student");
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const adjustStudentFees = trpc.admin.adjustStudentFees.useMutation({
+    onSuccess: () => {
+      toast.success("Fees & configuration adjusted successfully");
+      paymentsQuery.refetch();
+      overdueQuery.refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const exportQuery = trpc.admin.exportPaymentReport.useQuery(
+    {
+      batchId: selectedBatchFilter !== "all" ? Number(selectedBatchFilter) : undefined,
+      status: statusFilter !== "all" ? statusFilter : undefined,
+      format: "excel",
+    },
+    { enabled: false }
+  );
+
+  const createOrder = trpc.student.createRazorpayOrder.useMutation();
+  const verifyPayment = trpc.student.verifyRazorpayPayment.useMutation();
+
+  // Dialog & Form States
+  const [form, setForm] = useState({ studentId: 0, amount: 0, type: "tuition", dueDate: "" });
+  
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [adjustForm, setAdjustForm] = useState({
+    studentId: 0,
+    feesTotal: 0,
+    feesPaid: 0,
+    minInitialPayment: 0,
+    paymentDueDate: "",
+    gracePeriodDays: 7,
+  });
+
+  const [payOpen, setPayOpen] = useState(false);
+  const [payAmount, setPayAmount] = useState<number>(0);
+  const [activePayPaymentId, setActivePayPaymentId] = useState<number | null>(null);
+  const [showReceipt, setShowReceipt] = useState(false);
+  const [receiptData, setReceiptData] = useState<any>(null);
+  const [openSimulator, setOpenSimulator] = useState(false);
+  const [simulatorOrderData, setSimulatorOrderData] = useState<{ orderId: string; amount: number } | null>(null);
+
+
+
+  // Constants for student validations
+  const balance = myProfile.data?.profile
+    ? parseFloat(myProfile.data.profile.feesBalance ?? "0")
+    : 0;
+  const feesPaid = myProfile.data?.profile
+    ? parseFloat(myProfile.data.profile.feesPaid ?? "0")
+    : 0;
+  const minInitial = myProfile.data?.profile
+    ? parseFloat(myProfile.data.profile.minInitialPayment ?? "0")
+    : 0;
+  const isFirstPayment = feesPaid === 0 && minInitial > 0;
+  const minRequiredAmount = isFirstPayment ? Math.min(minInitial, balance) : 0;
+  const isAmountValid = payAmount >= (minRequiredAmount || 1) && payAmount <= balance;
+
+  // Actions
+  const handleOpenAdjust = (studentId: number, profile?: any) => {
+    setAdjustForm({
+      studentId,
+      feesTotal: profile ? parseFloat(profile.feesTotal || "0") : 0,
+      feesPaid: profile ? parseFloat(profile.feesPaid || "0") : 0,
+      minInitialPayment: profile ? parseFloat(profile.minInitialPayment || "0") : 0,
+      paymentDueDate: profile?.paymentDueDate ? new Date(profile.paymentDueDate).toISOString().split("T")[0] : "",
+      gracePeriodDays: profile?.gracePeriodDays ?? 7,
+    });
+    setAdjustOpen(true);
+  };
+
+  const handleExport = async () => {
+    try {
+      const result = await exportQuery.refetch();
+      if (result.data) {
+        const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `fee-payment-report-${Date.now()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        toast.success("JSON payment report exported successfully");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to export report");
+    }
+  };
+
+  const loadRazorpayScript = () => {
+    return new Promise((resolve) => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  };
+
+  const handlePayment = async (amount: number) => {
+    try {
+      if (amount <= 0) {
+        toast.error("Invalid payment amount.");
+        return;
+      }
+      const order = await createOrder.mutateAsync({ amount, paymentId: activePayPaymentId || undefined });
+      if (order.keyId.includes("mock") || order.keyId === "") {
+        setSimulatorOrderData({ orderId: order.orderId, amount: order.amount });
+        setOpenSimulator(true);
+        return;
+      }
+      const loaded = await loadRazorpayScript();
+      if (!loaded) {
+        toast.error("Failed to load Razorpay SDK. Showing simulator instead.");
+        setSimulatorOrderData({ orderId: order.orderId, amount: order.amount });
+        setOpenSimulator(true);
+        return;
+      }
+      const options = {
+        key: order.keyId,
+        amount: order.amount,
+        currency: order.currency,
+        name: "Emtees Academy",
+        description: "Course Fee Payment",
+        order_id: order.orderId,
+        handler: async function (response: any) {
+          try {
+            const result = await verifyPayment.mutateAsync({
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+              amount: order.amount / 100,
+              paymentId: activePayPaymentId || undefined,
+            });
+            toast.success("Payment successful!");
+            setReceiptData(result.payment);
+            setShowReceipt(true);
+            setActivePayPaymentId(null);
+            myProfile.refetch();
+            if (myPayments.isSuccess) myPayments.refetch();
+          } catch (err: any) {
+            toast.error(err.message || "Payment verification failed");
+          }
+        },
+        prefill: {
+          name: user?.name,
+          email: myProfile.data?.email || "",
+          contact: user?.phone || "",
+        },
+        theme: {
+          color: "#059669",
+        },
+      };
+      const rzp = new (window as any).Razorpay(options);
+      rzp.open();
+    } catch (err: any) {
+      toast.error(err.message || "Order creation failed");
+    }
+  };
+
+  const handleSimulateSuccess = async () => {
+    if (!simulatorOrderData) return;
+    try {
+      const mockPaymentId = `pay_mock_${Math.random().toString(36).substring(2, 15)}`;
+      const result = await verifyPayment.mutateAsync({
+        razorpay_payment_id: mockPaymentId,
+        razorpay_order_id: simulatorOrderData.orderId,
+        razorpay_signature: "mock_signature",
+        amount: simulatorOrderData.amount / 100,
+        paymentId: activePayPaymentId || undefined,
+      });
+      toast.success("Mock Payment successful!");
+      setOpenSimulator(false);
+      setReceiptData(result.payment);
+      setShowReceipt(true);
+      setActivePayPaymentId(null);
+      myProfile.refetch();
+      if (myPayments.isSuccess) myPayments.refetch();
+    } catch (err: any) {
+      toast.error(err.message || "Simulated payment verification failed");
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "paid":
+        return (
+          <Badge className="bg-emerald-100 text-emerald-700">
+            <CheckCircle className="w-3 h-3 mr-1" /> Paid
+          </Badge>
+        );
+      case "unpaid":
+        return (
+          <Badge variant="secondary">
+            <AlertCircle className="w-3 h-3 mr-1" /> Unpaid
+          </Badge>
+        );
+      case "partial":
+        return <Badge className="bg-yellow-100 text-yellow-700">Partial</Badge>;
+      case "overdue":
+        return <Badge variant="destructive">Overdue</Badge>;
+      default:
+        return <Badge variant="secondary">{status}</Badge>;
+    }
+  };
+
+  if (!user) return null;
+
+  if (user.role === "academic_head") {
+    return (
+      <div className="flex flex-col items-center justify-center p-8 py-16 border rounded-xl bg-white space-y-4">
+        <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center text-red-600">
+          <AlertCircle className="w-6 h-6" />
+        </div>
+        <div className="text-center space-y-1">
+          <h3 className="text-lg font-bold text-gray-800">Access Denied</h3>
+          <p className="text-sm text-gray-500 max-w-sm">
+            Academic Head does not have permission to access financial or payment management.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (myProfile.isLoading && !isAdmin) {
+    return <div className="p-8 text-center text-gray-500">Loading fee profile...</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Student View Header & Banner */}
+      {!isAdmin && myProfile.data?.profile && (
+        <div className="space-y-6">
+          {myProfile.data?.isRestricted && (
+            <Card className="border-red-200 bg-red-50 dark:bg-red-950/20 dark:border-red-900 shadow-sm animate-pulse rounded-xl">
+              <CardContent className="p-4 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5 shrink-0" />
+                <div className="space-y-1">
+                  <h4 className="font-semibold text-sm text-red-800 dark:text-red-300">Access Restricted Due to Outstanding Fees.</h4>
+                  <p className="text-xs text-red-700 dark:text-red-400">
+                    Your account access has been restricted due to outstanding dues. Please clear your outstanding balance to regain access to live classes, recorded sessions, group chats, and learning resources.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className="border-emerald-100 bg-gradient-to-br from-emerald-50/20 to-teal-50/10 dark:from-emerald-950/5 dark:to-slate-900/5 shadow-sm rounded-xl">
+            <CardHeader className="pb-2 border-b border-gray-50/50 dark:border-gray-900/50 flex flex-row items-center justify-between">
+              <CardTitle className="text-base flex items-center gap-2 text-emerald-800 dark:text-emerald-400">
+                <Wallet className="w-5 h-5 text-emerald-600" /> My Fees & Payment Summary
+                {myProfile.data?.enrollments?.[0]?.paymentType === "INSTALLMENT" ? (
+                  <Badge className="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 ml-2">Installment Payment</Badge>
+                ) : (
+                  <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 ml-2">Full Payment</Badge>
+                )}
+              </CardTitle>
+              {balance > 0 && (
+                <Button
+                  onClick={() => {
+                    const tuitionPayments = myPayments.data?.filter(p => p.type === "tuition" && p.status !== "paid") || [];
+                    const sortedInst = [...tuitionPayments].sort((a, b) => (a.installmentNumber || 999) - (b.installmentNumber || 999));
+                    const nextInst = sortedInst[0];
+                    if (nextInst && nextInst.installmentNumber !== null) {
+                      setActivePayPaymentId(nextInst.id);
+                      setPayAmount(parseFloat(nextInst.amount));
+                    } else {
+                      setActivePayPaymentId(null);
+                      const initialPay = isFirstPayment ? Math.min(minInitial, balance) : balance;
+                      setPayAmount(initialPay);
+                    }
+                    setPayOpen(true);
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs py-2 px-4 rounded-lg shadow-sm flex items-center gap-1.5"
+                >
+                  <CreditCard className="w-4 h-4" /> Pay Outstanding Balance
+                </Button>
+              )}
+            </CardHeader>
+            <CardContent className="pt-6">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                <div className="bg-white dark:bg-gray-950 p-3 rounded-lg border">
+                  <p className="text-xs text-gray-500">Total Course Fee</p>
+                  <p className="text-xl font-bold text-gray-800 dark:text-gray-200 mt-1">₹{myProfile.data.profile.feesTotal || 0}</p>
+                </div>
+                <div className="bg-white dark:bg-gray-950 p-3 rounded-lg border">
+                  <p className="text-xs text-gray-500">Amount Paid</p>
+                  <p className="text-xl font-bold text-emerald-600 mt-1">₹{myProfile.data.profile.feesPaid || 0}</p>
+                </div>
+                <div className="bg-white dark:bg-gray-950 p-3 rounded-lg border">
+                  <p className="text-xs text-gray-500">Outstanding Balance</p>
+                  <p className="text-xl font-bold text-red-600 mt-1">₹{balance}</p>
+                </div>
+                <div className="bg-white dark:bg-gray-950 p-3 rounded-lg border">
+                  <p className="text-xs text-gray-500">Payment Due Date</p>
+                  <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 mt-2">
+                    {myProfile.data.profile.paymentDueDate ? new Date(myProfile.data.profile.paymentDueDate).toLocaleDateString() : "-"}
+                  </p>
+                  {myProfile.data.profile.gracePeriodDays ? (
+                    <p className="text-[10px] text-gray-400">Grace: {myProfile.data.profile.gracePeriodDays} days</p>
+                  ) : null}
+                </div>
+              </div>
+
+              {isFirstPayment && (
+                <div className="mt-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/50 rounded-lg p-3 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">Minimum Initial Payment Requirement: </span>
+                    You must pay at least <span className="font-bold">₹{minInitial}</span> for your first installment to activate full access.
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Student Installment Schedule Table */}
+          {myProfile.data?.enrollments?.[0]?.paymentType === "INSTALLMENT" && (
+            <Card className="border shadow-sm rounded-xl">
+              <CardHeader className="pb-2 border-b">
+                <CardTitle className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1.5">
+                  <Wallet className="w-4 h-4 text-blue-600" /> Installment Schedule
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0 overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Installment #</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Due Date</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Paid Date</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(() => {
+                      const tuitionPayments = myPayments.data?.filter(p => p.type === "tuition" && p.installmentNumber !== null) || [];
+                      const sortedInst = [...tuitionPayments].sort((a, b) => (a.installmentNumber || 0) - (b.installmentNumber || 0));
+                      
+                      if (sortedInst.length === 0) {
+                        return (
+                          <TableRow>
+                            <TableCell colSpan={6} className="text-center text-gray-400 py-4">
+                              No installments configured.
+                            </TableCell>
+                          </TableRow>
+                        );
+                      }
+                      
+                      return sortedInst.map((inst) => (
+                        <TableRow key={inst.id}>
+                          <TableCell className="font-semibold">Installment #{inst.installmentNumber}</TableCell>
+                          <TableCell className="font-medium">₹{inst.amount}</TableCell>
+                          <TableCell>{inst.dueDate ? new Date(inst.dueDate).toLocaleDateString() : "-"}</TableCell>
+                          <TableCell>{getStatusBadge(inst.status)}</TableCell>
+                          <TableCell>{inst.paidDate ? new Date(inst.paidDate).toLocaleDateString() : (inst.paidAt ? new Date(inst.paidAt).toLocaleDateString() : "-")}</TableCell>
+                          <TableCell className="text-right py-2">
+                            {inst.status !== "paid" && (
+                              <Button
+                                size="sm"
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs py-1 px-3 rounded-lg h-7"
+                                onClick={() => {
+                                  setActivePayPaymentId(inst.id);
+                                  setPayAmount(parseFloat(inst.amount));
+                                  setPayOpen(true);
+                                }}
+                              >
+                                Pay Now
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ));
+                    })()}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Admin View */}
+      {isAdmin && (
+        <div className="space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-4">
+            <div>
+              <h3 className="text-xl font-bold text-gray-800 dark:text-gray-100">Fee Administration</h3>
+              <p className="text-xs text-gray-500">Configure parameters, adjustments, track balances, and export audit reports.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => handleOpenAdjust(0)} variant="outline" className="border-gray-300 hover:bg-gray-50 text-xs flex items-center gap-1.5 h-9">
+                <Sliders className="w-4 h-4 text-gray-500" /> Adjust Student Fees
+              </Button>
+              <Dialog open={open} onOpenChange={setOpen}>
+                <DialogTrigger asChild>
+                  <Button className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs flex items-center gap-1.5 h-9">
+                    <Plus className="w-4 h-4" /> Create Payment Invoice
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-md bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-gray-800">
+                  <DialogHeader><DialogTitle className="text-base font-bold">Create Fee Invoice Record</DialogTitle></DialogHeader>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      createPayment.mutate({
+                        ...form,
+                        dueDate: form.dueDate ? new Date(form.dueDate) : undefined,
+                      });
+                    }}
+                    className="space-y-3 mt-2"
+                  >
+                    <div>
+                      <label className="text-xs font-semibold text-gray-600">Student User ID *</label>
+                      <Input type="number" required placeholder="Student ID" value={form.studentId || ""} onChange={(e) => setForm({ ...form, studentId: Number(e.target.value) })} />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-600">Invoice Amount *</label>
+                      <Input type="number" required placeholder="Amount" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-600">Payment Type</label>
+                      <Input placeholder="tuition/exam/other" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-600">Due Date</label>
+                      <Input type="date" placeholder="Due Date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
+                    </div>
+                    <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold">Create Invoice</Button>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </div>
+
+          <Tabs defaultValue="payments" className="space-y-4">
+            <TabsList className="bg-gray-100 dark:bg-slate-900 border p-1 rounded-lg">
+              <TabsTrigger value="payments">Payment Records</TabsTrigger>
+              <TabsTrigger value="overdue">Overdue Students</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="payments" className="space-y-4">
+              <div className="bg-gray-50 dark:bg-gray-900/40 p-4 rounded-xl border flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase">Payment Status</label>
+                    <select className="border rounded-md px-3 py-1.5 text-xs bg-white dark:bg-gray-950 max-w-[150px] w-full" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                      <option value="all">All Statuses</option>
+                      <option value="paid">Paid</option>
+                      <option value="unpaid">Unpaid</option>
+                      <option value="partial">Partial</option>
+                      <option value="overdue">Overdue</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase">Batch Filter</label>
+                    <select className="border rounded-md px-3 py-1.5 text-xs bg-white dark:bg-gray-950 max-w-[150px] w-full" value={selectedBatchFilter} onChange={(e) => setSelectedBatchFilter(e.target.value)}>
+                      <option value="all">All Batches</option>
+                      {batchesQuery.data?.map((b) => (
+                        <option key={b.id} value={String(b.id)}>{b.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase">Due Date</label>
+                    <Input type="date" className="h-8 text-xs max-w-[150px] py-1" value={selectedDueDateFilter} onChange={(e) => setSelectedDueDateFilter(e.target.value)} />
+                  </div>
+                </div>
+
+                <Button onClick={handleExport} className="bg-blue-600 hover:bg-blue-700 text-white text-xs flex items-center gap-1.5 self-end h-8">
+                  <Download className="w-3.5 h-3.5" /> Export Report (JSON)
+                </Button>
+              </div>
+
+              <Card>
+                <CardContent className="p-0 overflow-x-auto">
+                  {paymentsQuery.isLoading ? (
+                    <p className="text-center text-gray-400 py-10">Loading payments list...</p>
+                  ) : !paymentsQuery.data || paymentsQuery.data.length === 0 ? (
+                    <p className="text-center text-gray-400 py-10">No payments match selected filters.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Student</TableHead>
+                          <TableHead>Batch</TableHead>
+                          <TableHead>Amount</TableHead>
+                          <TableHead>Type</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Due Date</TableHead>
+                          <TableHead>Paid At</TableHead>
+                          <TableHead>Transaction ID</TableHead>
+                          <TableHead className="text-right">Action</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {paymentsQuery.data.map((p) => (
+                          <TableRow key={p.id}>
+                            <TableCell>
+                              <div className="font-semibold">{p.student?.name}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">ID: {p.student?.unionId}</div>
+                            </TableCell>
+                            <TableCell>
+                              <div>{p.batch?.name || "-"}</div>
+                              {p.installmentNumber !== null && (
+                                <div className="text-[10px] text-blue-600 font-semibold mt-0.5">Installment #{p.installmentNumber}</div>
+                              )}
+                            </TableCell>
+                            <TableCell className="font-medium">₹{p.amount}</TableCell>
+                            <TableCell className="capitalize">{p.type}</TableCell>
+                            <TableCell>{getStatusBadge(p.status)}</TableCell>
+                            <TableCell>{p.dueDate ? new Date(p.dueDate).toLocaleDateString() : "-"}</TableCell>
+                            <TableCell>{p.paidDate ? new Date(p.paidDate).toLocaleDateString() : (p.paidAt ? new Date(p.paidAt).toLocaleDateString() : "-")}</TableCell>
+                            <TableCell className="font-mono text-xs max-w-[120px] truncate">{p.transactionId || "-"}</TableCell>
+                            <TableCell className="text-right flex items-center justify-end gap-1.5 py-3">
+                              {p.status !== "paid" && (
+                                <Button size="sm" variant="outline" className="h-7 text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-100 flex items-center" onClick={() => recordPayment.mutate({ paymentId: p.id, amount: Number(p.amount) })}>
+                                  <CreditCard className="w-3 h-3 mr-1" /> Record
+                                </Button>
+                              )}
+                              <Button size="sm" variant="outline" className="h-7 text-[10px] flex items-center" onClick={() => handleOpenAdjust(p.studentId)}>
+                                <Sliders className="w-3 h-3 mr-1" /> Adjust
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="overdue" className="space-y-4">
+              <Card>
+                <CardContent className="p-0 overflow-x-auto">
+                  {overdueQuery.isLoading ? (
+                    <p className="text-center text-gray-400 py-10">Loading overdue list...</p>
+                  ) : !overdueQuery.data || overdueQuery.data.length === 0 ? (
+                    <p className="text-center text-emerald-600 py-10 font-medium">✓ No overdue student fee profiles found!</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Student</TableHead>
+                          <TableHead>Course</TableHead>
+                          <TableHead>Batch</TableHead>
+                          <TableHead>Total Fee</TableHead>
+                          <TableHead>Paid</TableHead>
+                          <TableHead>Balance</TableHead>
+                          <TableHead>Due Date</TableHead>
+                          <TableHead>Grace Period</TableHead>
+                          <TableHead className="text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {overdueQuery.data.map((o) => (
+                          <TableRow key={o.id}>
+                            <TableCell>
+                              <div className="font-semibold">{o.user?.name}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">ID: {o.user?.unionId}</div>
+                            </TableCell>
+                            <TableCell>{o.course || "-"}</TableCell>
+                            <TableCell>{o.batch || "-"}</TableCell>
+                            <TableCell>₹{o.feesTotal}</TableCell>
+                            <TableCell className="text-emerald-600 font-medium">₹{o.feesPaid}</TableCell>
+                            <TableCell className="text-red-600 font-bold">₹{o.feesBalance}</TableCell>
+                            <TableCell className="text-red-500 font-medium">{o.paymentDueDate ? new Date(o.paymentDueDate).toLocaleDateString() : "-"}</TableCell>
+                            <TableCell>{o.gracePeriodDays} days</TableCell>
+                            <TableCell className="text-right flex items-center justify-end gap-1.5 py-3">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-[10px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-100 flex items-center gap-1"
+                                onClick={() => sendManualReminder.mutate({ studentId: o.userId })}
+                                disabled={sendManualReminder.isPending}
+                              >
+                                <Send className="w-3 h-3" /> Remind
+                              </Button>
+                              <Button size="sm" variant="outline" className="h-7 text-[10px] flex items-center gap-1" onClick={() => handleOpenAdjust(o.userId, o)}>
+                                <Sliders className="w-3 h-3" /> Adjust
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
+        </div>
+      )}
+
+      {/* General Table of Payments for Student */}
+      {!isAdmin && (
+        <Card>
+          <CardHeader className="pb-2 border-b">
+            <CardTitle className="text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+              <Calendar className="w-4 h-4 text-emerald-600" /> My Payment Transactions
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0 overflow-x-auto">
+            {myPayments.isLoading ? (
+              <p className="text-center text-gray-400 py-10">Loading transactions...</p>
+            ) : !myPayments.data || myPayments.data.length === 0 ? (
+              <p className="text-center text-gray-400 py-10">No payment transactions recorded.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Batch</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Due Date</TableHead>
+                    <TableHead>Paid At</TableHead>
+                    <TableHead>Transaction ID</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {myPayments.data.map((p) => (
+                    <TableRow key={p.id}>
+                      <TableCell>{p.batch?.name || "-"}</TableCell>
+                      <TableCell className="font-semibold">₹{p.amount}</TableCell>
+                      <TableCell className="capitalize">{p.type}</TableCell>
+                      <TableCell>{getStatusBadge(p.status)}</TableCell>
+                      <TableCell>{p.dueDate ? new Date(p.dueDate).toLocaleDateString() : "-"}</TableCell>
+                      <TableCell>{p.paidAt ? new Date(p.paidAt).toLocaleDateString() : "-"}</TableCell>
+                      <TableCell className="font-mono text-xs">{p.transactionId || "-"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Adjust Student Fees Dialog */}
+      <Dialog open={adjustOpen} onOpenChange={setAdjustOpen}>
+        <DialogContent className="max-w-md bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-gray-800">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-gray-800 dark:text-gray-200">Adjust Student Fees & Settings</DialogTitle>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              adjustStudentFees.mutate({
+                studentId: Number(adjustForm.studentId),
+                feesTotal: Number(adjustForm.feesTotal),
+                feesPaid: Number(adjustForm.feesPaid),
+                minInitialPayment: Number(adjustForm.minInitialPayment),
+                paymentDueDate: adjustForm.paymentDueDate ? new Date(adjustForm.paymentDueDate) : undefined,
+                gracePeriodDays: Number(adjustForm.gracePeriodDays),
+              });
+              setAdjustOpen(false);
+            }}
+            className="space-y-3 mt-2"
+          >
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Student User ID *</label>
+              <Input type="number" required placeholder="User ID" value={adjustForm.studentId || ""} onChange={(e) => setAdjustForm({ ...adjustForm, studentId: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Total Course Fee (₹)</label>
+              <Input type="number" placeholder="Total Fees" value={adjustForm.feesTotal || 0} onChange={(e) => setAdjustForm({ ...adjustForm, feesTotal: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Fees Paid (₹)</label>
+              <Input type="number" placeholder="Fees Paid" value={adjustForm.feesPaid || 0} onChange={(e) => setAdjustForm({ ...adjustForm, feesPaid: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Minimum Initial Payment (₹)</label>
+              <Input type="number" placeholder="Minimum Initial Payment" value={adjustForm.minInitialPayment || 0} onChange={(e) => setAdjustForm({ ...adjustForm, minInitialPayment: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Payment Due Date</label>
+              <Input type="date" value={adjustForm.paymentDueDate} onChange={(e) => setAdjustForm({ ...adjustForm, paymentDueDate: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Grace Period (Days)</label>
+              <Input type="number" placeholder="7" value={adjustForm.gracePeriodDays || 0} onChange={(e) => setAdjustForm({ ...adjustForm, gracePeriodDays: Number(e.target.value) })} />
+            </div>
+            <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold pt-2" disabled={adjustStudentFees.isPending}>
+              {adjustStudentFees.isPending ? "Updating..." : "Save Settings & Adjust"}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Student Payment Dialog */}
+      <Dialog open={payOpen} onOpenChange={setPayOpen}>
+        <DialogContent className="max-w-md bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-gray-800">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-gray-800 dark:text-gray-200">Make Course Fee Payment</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="bg-gray-50 dark:bg-slate-800/50 p-4 rounded-xl space-y-2 border">
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Total Fees:</span>
+                <span className="font-semibold text-gray-800 dark:text-gray-200">₹{myProfile.data?.profile?.feesTotal}</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Already Paid:</span>
+                <span className="font-semibold text-emerald-600">₹{myProfile.data?.profile?.feesPaid}</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-500 border-t pt-2 mt-2">
+                <span>Outstanding Balance:</span>
+                <span className="font-bold text-red-600">₹{balance}</span>
+              </div>
+              {isFirstPayment && (
+                <div className="flex justify-between text-xs text-amber-600 font-medium">
+                  <span>Minimum Initial Payment:</span>
+                  <span>₹{minInitial}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Payment Amount (₹)</label>
+              <Input
+                type="number"
+                placeholder="Enter amount"
+                value={payAmount || ""}
+                onChange={(e) => setPayAmount(Number(e.target.value))}
+                max={balance}
+                min={minRequiredAmount || 1}
+              />
+              {isFirstPayment && payAmount < minRequiredAmount && (
+                <p className="text-[11px] text-red-500 font-medium mt-1">
+                  ⚠ First payment must be at least the minimum initial payment of ₹{minRequiredAmount}.
+                </p>
+              )}
+              {payAmount > balance && (
+                <p className="text-[11px] text-red-500 font-medium mt-1">
+                  ⚠ Amount cannot exceed the outstanding balance of ₹{balance}.
+                </p>
+              )}
+            </div>
+
+            <Button
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold mt-2"
+              onClick={() => {
+                if (!isAmountValid) return;
+                setPayOpen(false);
+                handlePayment(payAmount);
+              }}
+              disabled={!isAmountValid}
+            >
+              Proceed to Pay ₹{payAmount || 0}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Receipt Modal */}
+      <Dialog open={showReceipt} onOpenChange={setShowReceipt}>
+        <DialogContent className="max-w-md bg-white border border-gray-100 shadow-xl rounded-xl p-0 overflow-hidden">
+          <div className="p-6 space-y-6 print:p-0 print:m-0" id="payment-receipt">
+            <div className="text-center space-y-2 border-b pb-4">
+              <h2 className="text-2xl font-extrabold text-emerald-600 tracking-tight">EMTEES ACADEMY</h2>
+              <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Official Payment Receipt</p>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Receipt ID:</span>
+                <span className="font-mono font-semibold text-gray-800">REC-{receiptData?.id || "N/A"}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Transaction ID:</span>
+                <span className="font-mono font-semibold text-gray-800 text-xs">{receiptData?.transactionId || "N/A"}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Date:</span>
+                <span className="font-semibold text-gray-800">
+                  {receiptData?.paidAt ? new Date(receiptData.paidAt).toLocaleString() : new Date().toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Student Name:</span>
+                <span className="font-semibold text-gray-800">{receiptData?.student?.name || user?.name}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Course/Batch:</span>
+                <span className="font-semibold text-gray-800">{receiptData?.courseName || "Course"}</span>
+              </div>
+              <div className="flex justify-between text-sm border-t pt-4">
+                <span className="text-gray-500">Amount Paid:</span>
+                <span className="font-bold text-emerald-600 text-lg">₹{receiptData?.amount || 0}</span>
+              </div>
+            </div>
+          </div>
+          <div className="bg-gray-50 px-6 py-4 flex gap-3 justify-end border-t print:hidden">
+            <Button variant="outline" size="sm" onClick={() => setShowReceipt(false)}>Close</Button>
+            <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => window.print()}>
+              <Printer className="w-4 h-4 mr-2" /> Print Receipt
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Razorpay Payment Simulator Dialog */}
+      <Dialog open={openSimulator} onOpenChange={setOpenSimulator}>
+        <DialogContent className="max-w-md bg-white border border-yellow-100 shadow-xl rounded-xl p-6">
+          <DialogHeader>
+            <DialogTitle className="text-amber-800 flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-amber-500" />
+              Razorpay Payment Simulator
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 my-4 text-center">
+            <p className="text-sm text-gray-600">
+              The application is running in development mode or with mock API credentials. You can simulate the checkout flow below.
+            </p>
+            <div className="bg-emerald-50 dark:bg-emerald-950/20 p-5 rounded-xl border border-emerald-100 dark:border-emerald-900">
+              <p className="text-xs text-emerald-800 dark:text-emerald-400 uppercase tracking-wider font-semibold">Simulating Order ID</p>
+              <p className="text-base font-mono font-bold text-gray-800 dark:text-gray-200 mt-1">{simulatorOrderData?.orderId}</p>
+              <p className="text-xs text-gray-400 mt-2">Amount: <span className="font-bold text-gray-700 dark:text-gray-300">₹{(simulatorOrderData?.amount ?? 0) / 100}</span></p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Button variant="outline" className="flex-1 text-xs" onClick={() => setOpenSimulator(false)}>Cancel</Button>
+              <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs" onClick={handleSimulateSuccess}>
+                Simulate Success
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
