@@ -29,7 +29,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Link } from "react-router";
+import Link from "next/link";
 
 export default function NotificationsPage() {
   const { user } = useAuth();
@@ -449,7 +449,7 @@ export default function NotificationsPage() {
                       {!n.isRead && (
                         <div className="flex items-center gap-2 pt-2.5">
                           {n.type === "class_reminder" && (
-                            <Link to="/classes">
+                            <Link href="/classes">
                               <Button
                                 size="sm"
                                 className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1 rounded-md"
@@ -460,7 +460,7 @@ export default function NotificationsPage() {
                             </Link>
                           )}
                           {n.type === "private_message" && (
-                            <Link to="/messages">
+                            <Link href="/messages">
                               <Button
                                 size="sm"
                                 className="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1 rounded-md"
@@ -471,7 +471,7 @@ export default function NotificationsPage() {
                             </Link>
                           )}
                           {n.type === "payment" && (
-                            <Link to="/fees">
+                            <Link href="/fees">
                               <Button
                                 size="sm"
                                 className="bg-rose-600 hover:bg-rose-700 text-white text-xs px-3 py-1 rounded-md"

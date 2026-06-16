@@ -46,8 +46,15 @@ export default function SettingsPage() {
   const [selectedDuration, setSelectedDuration] = useState<"1_hour" | "8_hours" | "24_hours" | "indefinite">("1_hour");
 
   // Feature flags — read from localStorage (env vars are server-side; show as read-only info)
-  const gamificationFlag = localStorage.getItem("FEATURE_GAMIFICATION") ?? "false";
-  const aiInsightsFlag = localStorage.getItem("FEATURE_AI_INSIGHTS") ?? "false";
+  const [gamificationFlag, setGamificationFlag] = useState("false");
+  const [aiInsightsFlag, setAiInsightsFlag] = useState("false");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setGamificationFlag(localStorage.getItem("FEATURE_GAMIFICATION") ?? "false");
+      setAiInsightsFlag(localStorage.getItem("FEATURE_AI_INSIGHTS") ?? "false");
+    }
+  }, []);
 
   // Mutations
   const updateProfileMutation = trpc.user.updateMyProfile.useMutation({

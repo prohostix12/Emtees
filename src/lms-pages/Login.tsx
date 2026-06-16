@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router";
+import { useRouter } from "next/navigation";
 import { trpc } from "@/providers/trpc";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import { isValidPhone, PHONE_ERROR_MESSAGE } from "@contracts/validation";
 
 export default function Login() {
-  const navigate = useNavigate();
+  const router = useRouter();
   const { login } = useAuth();
   const [tab, setTab] = useState("password");
   const [phone, setPhone] = useState("");
@@ -40,7 +40,7 @@ export default function Login() {
     onSuccess: (data) => {
       login(data);
       toast.success("Logged in with OTP");
-      navigate("/");
+      router.push("/");
     },
     onError: (err) => toast.error(err.message),
   });
@@ -49,7 +49,7 @@ export default function Login() {
     onSuccess: (data) => {
       login(data);
       toast.success("Logged in successfully");
-      navigate("/");
+      router.push("/");
     },
     onError: (err) => toast.error(err.message),
   });

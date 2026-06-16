@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Link } from "react-router";
+import Link from "next/link";
 import { Home, AlertCircle } from "lucide-react";
 
 export default function NotFound() {
@@ -9,7 +9,7 @@ export default function NotFound() {
         <AlertCircle className="w-16 h-16 text-gray-300 mx-auto" />
         <h1 className="text-4xl font-bold text-gray-800">404</h1>
         <p className="text-gray-500">Page not found</p>
-        <Link to="/">
+        <Link href="/">
           <Button className="bg-emerald-600 hover:bg-emerald-700">
             <Home className="w-4 h-4 mr-2" /> Go Home
           </Button>

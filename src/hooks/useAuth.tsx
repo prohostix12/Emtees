@@ -1,3 +1,5 @@
+"use client";
+
 import { useState, useEffect, createContext, useContext, type ReactNode } from "react";
 import { trpc } from "@/providers/trpc";
 
@@ -26,19 +28,28 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const meQuery = trpc.auth.me.useQuery(undefined, { enabled: !!token });
 
   useEffect(() => {
-    if (meQuery.data) {
-      setUser(meQuery.data);
+    const t = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (t) {
+      setToken(t);
+    } else {
       setIsLoading(false);
-    } else if (meQuery.isError) {
-      setUser(null);
-      setIsLoading(false);
-    } else if (!token) {
-      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (token) {
+      if (meQuery.data) {
+        setUser(meQuery.data);
+        setIsLoading(false);
+      } else if (meQuery.isError) {
+        setUser(null);
+        setIsLoading(false);
+      }
     }
   }, [meQuery.data, meQuery.isError, token]);
 

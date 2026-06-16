@@ -40,28 +40,5 @@ app.all("/api/*", (c) => c.json({ error: "Not Found" }, 404));
 
 export default app;
 
-if (env.isProduction && !process.env.VERCEL) {
-  const { serve } = await import("@hono/node-server");
-  const { Server } = await import("socket.io");
-  const { serveStaticFiles } = await import("./lib/vite");
-  serveStaticFiles(app);
 
-  const port = parseInt(process.env.PORT || "3000");
-  const httpServer = serve({ fetch: app.fetch, port }, () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
-
-  // Attach socket.io to the same Node.js HTTP server
-  const io = new Server(httpServer as any, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
-    maxHttpBufferSize: 10 * 1024 * 1024, // 10 MB max socket payload
-  });
-  setIo(io);
-  setupSocketHandlers(io);
-  console.log(`[socket.io] WebSocket server attached on port ${port}`);
-}
-
-if (!process.env.VERCEL) {
-  startScheduler();
-}
 

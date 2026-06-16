@@ -16,8 +16,9 @@ import {
   Video,
   AlertCircle,
 } from "lucide-react";
-import { Link } from "react-router";
-import JitsiMeet from "@/components/JitsiMeet";
+import Link from "next/link";
+import dynamic from "next/dynamic";
+const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -121,7 +122,7 @@ export default function Dashboard() {
               <p className="text-xs text-red-700 dark:text-red-400">
                 Your account access has been restricted due to outstanding dues. Please clear your outstanding balance to regain access to live classes, recorded sessions, group chats, and learning resources.
               </p>
-              <Link to="/fees" className="inline-flex items-center gap-1 text-xs font-semibold text-red-800 dark:text-red-300 mt-2 hover:underline">
+              <Link href="/fees" className="inline-flex items-center gap-1 text-xs font-semibold text-red-800 dark:text-red-300 mt-2 hover:underline">
                 Pay Outstanding Fees <ArrowRight className="w-3 h-3" />
               </Link>
             </div>
@@ -278,7 +279,7 @@ export default function Dashboard() {
             </span>
             Live & Upcoming Sessions
           </CardTitle>
-          <Link to="/classes" className="text-xs text-emerald-600 hover:text-emerald-700 font-medium hover:underline flex items-center gap-1">
+          <Link href="/classes" className="text-xs text-emerald-600 hover:text-emerald-700 font-medium hover:underline flex items-center gap-1">
             View All Classes <ArrowRight className="w-3.5 h-3.5" />
           </Link>
         </CardHeader>
@@ -498,7 +499,7 @@ function StatCard({ icon: Icon, label, value, color }: { icon: any; label: strin
 
 function QuickAction({ to, label, desc }: { to: string; label: string; desc: string }) {
   return (
-    <Link to={to} className="flex items-center justify-between p-4 rounded-lg border hover:border-emerald-300 hover:bg-emerald-50 transition-colors group">
+    <Link href={to} className="flex items-center justify-between p-4 rounded-lg border hover:border-emerald-300 hover:bg-emerald-50 transition-colors group">
       <div>
         <p className="font-medium text-gray-900 group-hover:text-emerald-700">{label}</p>
         <p className="text-sm text-gray-500">{desc}</p>

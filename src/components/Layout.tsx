@@ -1,7 +1,10 @@
+"use client";
+
 import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { useLocation, Link } from "react-router";
+import { usePathname } from "next/navigation";
+import Link from "next/link";
 import {
   LayoutDashboard,
   Users,
@@ -58,19 +61,21 @@ const studentNav = [
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
-  const location = useLocation();
+  const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const reason = params.get("reason");
-    if (reason) {
-      toast.error(reason, { duration: 5000 });
-      // Remove query parameter without reload
-      const newUrl = window.location.pathname;
-      window.history.replaceState({}, document.title, newUrl);
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const reason = params.get("reason");
+      if (reason) {
+        toast.error(reason, { duration: 5000 });
+        // Remove query parameter without reload
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, newUrl);
+      }
     }
-  }, [location.search]);
+  }, []);
 
   // Manage the global socket.io connection (connect on login, disconnect on logout)
   const { socket } = useSocket();
@@ -143,7 +148,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   if (["academic_head"].includes(user.role)) {
     items = items.filter((item) => item.path !== "/requests");
   }
-  const currentLabel = items.find((i) => i.path === location.pathname)?.label || "Dashboard";
+  const currentLabel = items.find((i) => i.path === pathname)?.label || "Dashboard";
 
   const SidebarContent = () => (
     <>
@@ -153,13 +158,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       </div>
       <nav className="flex-1 overflow-y-auto p-3 space-y-0.5">
         {items.map((item) => {
-          const active = location.pathname === item.path;
+          const active = pathname === item.path;
           const isMessages = item.path === "/messages";
           const isNotifications = item.path === "/notifications";
           return (
             <Link
               key={item.path}
-              to={item.path}
+              href={item.path}
               onClick={() => setSidebarOpen(false)}
               className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                 active
@@ -245,7 +250,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
           <div className="flex items-center gap-4">
             <Link
-              to="/notifications"
+              href="/notifications"
               className="relative p-1.5 rounded-full hover:bg-gray-100 text-gray-600 transition-colors shrink-0"
               aria-label="Notifications"
             >
@@ -273,11 +278,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {/* Mobile bottom nav */}
         <nav className="md:hidden bg-white border-t flex items-center justify-around px-1 py-1 shrink-0">
           {items.slice(0, 5).map((item) => {
-            const active = location.pathname === item.path;
+            const active = pathname === item.path;
             return (
               <Link
                 key={item.path}
-                to={item.path}
+                href={item.path}
                 className={`flex flex-col items-center gap-0.5 px-2 py-1.5 rounded-lg min-w-0 flex-1 ${
                   active ? "text-emerald-700" : "text-gray-500"
                 }`}

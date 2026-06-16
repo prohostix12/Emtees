@@ -13,7 +13,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus, Play, Square, Video, Calendar, Clock, XCircle, ClipboardList, Edit3 } from "lucide-react";
-import JitsiMeet from "@/components/JitsiMeet";
+import dynamic from "next/dynamic";
+const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
 
 export default function ClassesPage() {
   const { user } = useAuth();

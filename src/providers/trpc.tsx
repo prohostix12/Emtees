@@ -1,3 +1,5 @@
+"use client";
+
 import { createTRPCReact } from "@trpc/react-query";
 import { httpBatchLink } from "@trpc/client";
 import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from "@tanstack/react-query";
@@ -13,10 +15,12 @@ const handleGlobalError = (error: any) => {
   const message = error?.message || "";
   if (message.includes("Your account has been logged in from another device") && !isRedirecting) {
     isRedirecting = true;
-    localStorage.removeItem("token");
-    window.location.href = `/login?reason=${encodeURIComponent(
-      "Your account has been logged in from another device. You have been signed out."
-    )}`;
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("token");
+      window.location.href = `/login?reason=${encodeURIComponent(
+        "Your account has been logged in from another device. You have been signed out."
+      )}`;
+    }
   }
 };
 
@@ -38,7 +42,7 @@ const trpcClient = trpc.createClient({
       url: "/api/trpc",
       transformer: superjson,
       headers() {
-        const token = localStorage.getItem("token");
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
       },
       fetch(input, init) {

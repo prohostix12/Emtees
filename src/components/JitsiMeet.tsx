@@ -1,3 +1,5 @@
+"use client";
+
 import { useRef, useState, useEffect } from "react";
 import { JitsiMeeting } from "@jitsi/react-sdk";
 import { trpc } from "@/providers/trpc";

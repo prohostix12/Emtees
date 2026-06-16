@@ -40,3 +40,29 @@ build/
 coverage/
 .nyc_output/
 
+# dependencies
+node_modules/
+
+# nextjs
+.next/
+out/
+
+# env
+.env
+.env.local
+.env.production
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# build
+dist/
+
+.next/
+node_modules/
+.env
+.env.local
+.env.production
+.out/
