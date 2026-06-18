@@ -23,6 +23,8 @@ import {
   GitPullRequest,
   Coins,
   Star,
+  GraduationCap,
+  Globe,
 } from "lucide-react";
 import { useSocket, useClassStartedAlert } from "@/hooks/useSocket";
 import { trpc } from "@/providers/trpc";
@@ -34,8 +36,10 @@ const navItems = [
   { icon: Users, label: "Users", path: "/users" },
   { icon: BookOpen, label: "Batches", path: "/batches" },
   { icon: MessageCircle, label: "Chat", path: "/chat" },
+  { icon: Globe, label: "Community", path: "/community" },
   { icon: MessageSquare, label: "Private Messages", path: "/messages" },
   { icon: Calendar, label: "Classes", path: "/classes" },
+  { icon: GraduationCap, label: "Learning", path: "/learning" },
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Coins, label: "Salaries", path: "/salaries" },
   { icon: Star, label: "Feedback", path: "/feedback" },
@@ -50,13 +54,16 @@ const studentNav = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/" },
   { icon: BookOpen, label: "Batches", path: "/batches" },
   { icon: MessageCircle, label: "Chat", path: "/chat" },
+  { icon: Globe, label: "Community", path: "/community" },
   { icon: MessageSquare, label: "Private Messages", path: "/messages" },
   { icon: Calendar, label: "Classes", path: "/classes" },
+  { icon: GraduationCap, label: "Learning", path: "/learning" },
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Star, label: "Feedback", path: "/feedback" },
   { icon: GitPullRequest, label: "Requests", path: "/requests" },
   { icon: BarChart3, label: "Progress", path: "/reports" },
   { icon: Bell, label: "Alerts", path: "/notifications" },
+  { icon: Shield, label: "Discipline", path: "/discipline" },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -138,7 +145,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   if (!user) return null;
 
-  let items = user.role === "student" ? studentNav : navItems;
+  let items = user.role === "student" ? [...studentNav] : [...navItems];
+  if (user.role === "student") {
+    const completionDate = myProfileQuery.data?.profile?.completionDate;
+    const hasCompleted = completionDate !== null && completionDate !== undefined;
+    if (!hasCompleted) {
+      items = items.filter((item) => item.path !== "/community");
+    }
+  }
   if (!["super_admin", "teacher"].includes(user.role)) {
     items = items.filter((item) => item.path !== "/salaries");
   }

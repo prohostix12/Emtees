@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { eq, desc, and, count, sql, inArray } from "drizzle-orm";
+import { eq, desc, and, count, sql, inArray, or } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments } from "@db/schema";
+import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments, learningNotes, learningVideos, assignments, assignmentSubmissions } from "@db/schema";
 import { sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
 import { isStudentFeeRestricted } from "../lib/feeHelper";
@@ -973,4 +973,430 @@ export const learningRouter = createRouter({
         },
       });
     }),
+
+  // Course Notes
+  listNotes: authedQuery
+    .input(z.object({
+      moduleId: z.number().optional(),
+      batchId: z.number().optional(),
+      search: z.string().optional()
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      let conditions = [];
+      
+      if (input?.moduleId) {
+        conditions.push(eq(learningNotes.moduleId, input.moduleId));
+      }
+      
+      if (input?.batchId) {
+        conditions.push(eq(learningNotes.batchId, input.batchId));
+      }
+
+      if (input?.search) {
+        conditions.push(sql`LOWER(${learningNotes.title}) LIKE ${'%' + input.search.toLowerCase() + '%'}`);
+      }
+
+      if (ctx.user.role === "student") {
+        const enrollments = await db.query.batchEnrollments.findMany({
+          where: and(
+            eq(batchEnrollments.studentId, ctx.user.id),
+            eq(batchEnrollments.status, "active")
+          )
+        });
+        const enrolledBatchIds = enrollments.map(e => e.batchId);
+        if (enrolledBatchIds.length > 0) {
+          conditions.push(inArray(learningNotes.batchId, enrolledBatchIds));
+        } else {
+          return [];
+        }
+      }
+
+      return db.query.learningNotes.findMany({
+        where: conditions.length > 0 ? and(...conditions) : undefined,
+        orderBy: desc(learningNotes.createdAt),
+        with: {
+          module: true,
+          batch: true,
+          uploader: true,
+        }
+      });
+    }),
+
+  createNote: teacherQuery
+    .input(z.object({
+      title: z.string(),
+      description: z.string().optional(),
+      moduleId: z.number(),
+      batchId: z.number(),
+      fileType: z.string(),
+      fileUrl: z.string()
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const [result] = await db.insert(learningNotes).values({
+        ...input,
+        uploadedBy: ctx.user.id,
+      }).returning({ id: learningNotes.id });
+      
+      return db.query.learningNotes.findFirst({
+        where: eq(learningNotes.id, result.id),
+        with: {
+          module: true,
+          batch: true,
+          uploader: true,
+        }
+      });
+    }),
+
+  updateNote: teacherQuery
+    .input(z.object({
+      id: z.number(),
+      title: z.string().optional(),
+      description: z.string().optional(),
+      moduleId: z.number().optional(),
+      batchId: z.number().optional(),
+      fileType: z.string().optional(),
+      fileUrl: z.string().optional()
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const { id, ...data } = input;
+      await db.update(learningNotes)
+        .set(data)
+        .where(eq(learningNotes.id, id));
+      
+      return db.query.learningNotes.findFirst({
+        where: eq(learningNotes.id, id),
+        with: {
+          module: true,
+          batch: true,
+          uploader: true,
+        }
+      });
+    }),
+
+  deleteNote: teacherQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      await db.delete(learningNotes).where(eq(learningNotes.id, input.id));
+      return { success: true };
+    }),
+
+  // Recorded Videos
+  listVideos: authedQuery
+    .input(z.object({
+      sessionType: z.enum(["one_to_one", "group"]).optional(),
+      moduleId: z.number().optional(),
+      batchId: z.number().optional(),
+      studentId: z.number().optional(),
+      teacherId: z.number().optional(),
+      search: z.string().optional()
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      let conditions = [];
+      
+      if (input?.sessionType) {
+        conditions.push(eq(learningVideos.sessionType, input.sessionType));
+      }
+      if (input?.moduleId) {
+        conditions.push(eq(learningVideos.moduleId, input.moduleId));
+      }
+      if (input?.batchId) {
+        conditions.push(eq(learningVideos.batchId, input.batchId));
+      }
+      if (input?.studentId) {
+        conditions.push(eq(learningVideos.studentId, input.studentId));
+      }
+      if (input?.teacherId) {
+        conditions.push(eq(learningVideos.teacherId, input.teacherId));
+      }
+
+      if (ctx.user.role === "student") {
+        const enrollments = await db.query.batchEnrollments.findMany({
+          where: and(
+            eq(batchEnrollments.studentId, ctx.user.id),
+            eq(batchEnrollments.status, "active")
+          )
+        });
+        const enrolledBatchIds = enrollments.map(e => e.batchId);
+        
+        let studentConditions = [];
+        if (enrolledBatchIds.length > 0) {
+          studentConditions.push(
+            and(
+              eq(learningVideos.sessionType, "group"),
+              inArray(learningVideos.batchId, enrolledBatchIds)
+            )
+          );
+        }
+        studentConditions.push(
+          and(
+            eq(learningVideos.sessionType, "one_to_one"),
+            eq(learningVideos.studentId, ctx.user.id)
+          )
+        );
+        
+        conditions.push(or(...studentConditions));
+      }
+
+      return db.query.learningVideos.findMany({
+        where: conditions.length > 0 ? and(...conditions) : undefined,
+        orderBy: desc(learningVideos.sessionDate),
+        with: {
+          module: true,
+          batch: true,
+          teacher: true,
+          student: true,
+          uploader: true,
+        }
+      });
+    }),
+
+  createVideo: teacherQuery
+    .input(z.object({
+      sessionType: z.enum(["one_to_one", "group"]),
+      studentId: z.number().optional().nullable(),
+      batchId: z.number().optional().nullable(),
+      teacherId: z.number(),
+      moduleId: z.number(),
+      sessionDate: z.date(),
+      duration: z.number(),
+      videoUrl: z.string(),
+      thumbnailUrl: z.string().optional().nullable()
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const [result] = await db.insert(learningVideos).values({
+        ...input,
+        uploadedBy: ctx.user.id,
+      }).returning({ id: learningVideos.id });
+      
+      return db.query.learningVideos.findFirst({
+        where: eq(learningVideos.id, result.id),
+        with: {
+          module: true,
+          batch: true,
+          teacher: true,
+          student: true,
+          uploader: true,
+        }
+      });
+    }),
+
+  deleteVideo: teacherQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      await db.delete(learningVideos).where(eq(learningVideos.id, input.id));
+      return { success: true };
+    }),
+
+  // Assignments
+  listAssignments: authedQuery
+    .input(z.object({
+      moduleId: z.number().optional(),
+      batchId: z.number().optional(),
+      search: z.string().optional()
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      let conditions = [];
+      
+      if (input?.moduleId) {
+        conditions.push(eq(assignments.moduleId, input.moduleId));
+      }
+      if (input?.batchId) {
+        conditions.push(eq(assignments.batchId, input.batchId));
+      }
+      if (input?.search) {
+        conditions.push(sql`LOWER(${assignments.title}) LIKE ${'%' + input.search.toLowerCase() + '%'}`);
+      }
+
+      if (ctx.user.role === "student") {
+        const enrollments = await db.query.batchEnrollments.findMany({
+          where: and(
+            eq(batchEnrollments.studentId, ctx.user.id),
+            eq(batchEnrollments.status, "active")
+          )
+        });
+        const enrolledBatchIds = enrollments.map(e => e.batchId);
+        if (enrolledBatchIds.length > 0) {
+          conditions.push(inArray(assignments.batchId, enrolledBatchIds));
+        } else {
+          return [];
+        }
+      }
+
+      return db.query.assignments.findMany({
+        where: conditions.length > 0 ? and(...conditions) : undefined,
+        orderBy: desc(assignments.createdAt),
+        with: {
+          module: true,
+          batch: true,
+          creator: true,
+          submissions: true,
+        }
+      });
+    }),
+
+  createAssignment: teacherQuery
+    .input(z.object({
+      title: z.string(),
+      description: z.string().optional(),
+      moduleId: z.number(),
+      batchId: z.number(),
+      dueDate: z.date(),
+      attachmentUrl: z.string().optional().nullable(),
+      attachmentName: z.string().optional().nullable()
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const [result] = await db.insert(assignments).values({
+        ...input,
+        createdBy: ctx.user.id,
+      }).returning({ id: assignments.id });
+      
+      return db.query.assignments.findFirst({
+        where: eq(assignments.id, result.id),
+        with: {
+          module: true,
+          batch: true,
+          creator: true,
+        }
+      });
+    }),
+
+  updateAssignment: teacherQuery
+    .input(z.object({
+      id: z.number(),
+      title: z.string().optional(),
+      description: z.string().optional(),
+      moduleId: z.number().optional(),
+      batchId: z.number().optional(),
+      dueDate: z.date().optional(),
+      attachmentUrl: z.string().optional().nullable(),
+      attachmentName: z.string().optional().nullable()
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const { id, ...data } = input;
+      await db.update(assignments)
+        .set(data)
+        .where(eq(assignments.id, id));
+      
+      return db.query.assignments.findFirst({
+        where: eq(assignments.id, id),
+        with: {
+          module: true,
+          batch: true,
+          creator: true,
+        }
+      });
+    }),
+
+  deleteAssignment: teacherQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      await db.delete(assignments).where(eq(assignments.id, input.id));
+      return { success: true };
+    }),
+
+  // Assignment Submissions
+  listSubmissions: authedQuery
+    .input(z.object({
+      assignmentId: z.number().optional(),
+      studentId: z.number().optional()
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      let conditions = [];
+      
+      if (input?.assignmentId) {
+        conditions.push(eq(assignmentSubmissions.assignmentId, input.assignmentId));
+      }
+      
+      if (ctx.user.role === "student") {
+        conditions.push(eq(assignmentSubmissions.studentId, ctx.user.id));
+      } else if (input?.studentId) {
+        conditions.push(eq(assignmentSubmissions.studentId, input.studentId));
+      }
+
+      return db.query.assignmentSubmissions.findMany({
+        where: conditions.length > 0 ? and(...conditions) : undefined,
+        orderBy: desc(assignmentSubmissions.submittedDate),
+        with: {
+          student: true,
+          assignment: {
+            with: {
+              module: true,
+              batch: true,
+            }
+          }
+        }
+      });
+    }),
+
+  submitAssignment: authedQuery
+    .input(z.object({
+      assignmentId: z.number(),
+      submissionFileUrl: z.string(),
+      submissionFileName: z.string().optional()
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      await db.delete(assignmentSubmissions).where(
+        and(
+          eq(assignmentSubmissions.assignmentId, input.assignmentId),
+          eq(assignmentSubmissions.studentId, ctx.user.id)
+        )
+      );
+
+      const [result] = await db.insert(assignmentSubmissions).values({
+        ...input,
+        studentId: ctx.user.id,
+        status: "Submitted"
+      }).returning({ id: assignmentSubmissions.id });
+      
+      return db.query.assignmentSubmissions.findFirst({
+        where: eq(assignmentSubmissions.id, result.id),
+        with: {
+          student: true,
+          assignment: true,
+        }
+      });
+    }),
+
+  reviewSubmission: teacherQuery
+    .input(z.object({
+      submissionId: z.number(),
+      marks: z.number().optional().nullable(),
+      feedback: z.string().optional().nullable(),
+      status: z.string()
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const { submissionId, ...data } = input;
+      
+      await db.update(assignmentSubmissions)
+        .set(data)
+        .where(eq(assignmentSubmissions.id, submissionId));
+      
+      return db.query.assignmentSubmissions.findFirst({
+        where: eq(assignmentSubmissions.id, submissionId),
+        with: {
+          student: true,
+          assignment: true,
+        }
+      });
+    }),
 });
+

@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { trpc } from "@/providers/trpc";
+import { useQueryClient } from "@tanstack/react-query";
+import { getQueryKey } from "@trpc/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -33,6 +35,8 @@ import Link from "next/link";
 
 export default function NotificationsPage() {
   const { user } = useAuth();
+  const utils = trpc.useUtils();
+  const queryClient = useQueryClient();
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [limit, setLimit] = useState(20);
   const [activeTab, setActiveTab] = useState<"all" | "unread">("all");
@@ -65,19 +69,77 @@ export default function NotificationsPage() {
 
   // TRPC Mutations
   const markRead = trpc.notification.markRead.useMutation({
+    onMutate: async (variables) => {
+      const queryKey = getQueryKey(trpc.notification.list);
+      await queryClient.cancelQueries({ queryKey });
+      const previousQueries = queryClient.getQueriesData<any>({ queryKey });
+
+      queryClient.setQueriesData<any>(
+        { queryKey },
+        (oldData: any) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            items: oldData.items.map((item: any) =>
+              item.id === variables.id ? { ...item, isRead: true } : item
+            ),
+          };
+        }
+      );
+
+      return { previousQueries };
+    },
+    onError: (err, variables, context) => {
+      if (context?.previousQueries) {
+        for (const [queryKey, queryData] of context.previousQueries) {
+          queryClient.setQueryData(queryKey, queryData);
+        }
+      }
+      toast.error(err.message);
+    },
     onSuccess: () => {
-      refetch();
       toast.success("Notification marked as read");
     },
-    onError: (err) => toast.error(err.message),
+    onSettled: () => {
+      utils.notification.list.invalidate();
+    },
   });
 
   const markAllRead = trpc.notification.markAllRead.useMutation({
+    onMutate: async () => {
+      const queryKey = getQueryKey(trpc.notification.list);
+      await queryClient.cancelQueries({ queryKey });
+      const previousQueries = queryClient.getQueriesData<any>({ queryKey });
+
+      queryClient.setQueriesData<any>(
+        { queryKey },
+        (oldData: any) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            items: oldData.items.map((item: any) =>
+              item.type !== "announcement" ? { ...item, isRead: true } : item
+            ),
+          };
+        }
+      );
+
+      return { previousQueries };
+    },
+    onError: (err, variables, context) => {
+      if (context?.previousQueries) {
+        for (const [queryKey, queryData] of context.previousQueries) {
+          queryClient.setQueryData(queryKey, queryData);
+        }
+      }
+      toast.error(err.message);
+    },
     onSuccess: () => {
-      refetch();
       toast.success("All notifications marked as read");
     },
-    onError: (err) => toast.error(err.message),
+    onSettled: () => {
+      utils.notification.list.invalidate();
+    },
   });
 
   const deleteNotification = trpc.notification.delete.useMutation({
@@ -394,7 +456,14 @@ export default function NotificationsPage() {
               return (
                 <Card
                   key={n.id}
+                  onClick={() => {
+                    if (!n.isRead && !isAnnouncement) {
+                      markRead.mutate({ id: n.id as number });
+                    }
+                  }}
                   className={`transition-all duration-200 border border-gray-100 dark:border-gray-800 shadow-sm hover:shadow-md ${
+                    !n.isRead && !isAnnouncement ? "cursor-pointer" : ""
+                  } ${
                     n.isRead
                       ? "opacity-60 bg-white dark:bg-slate-950"
                       : `bg-white dark:bg-slate-950 border-l-4 ${
@@ -449,7 +518,10 @@ export default function NotificationsPage() {
                       {!n.isRead && (
                         <div className="flex items-center gap-2 pt-2.5">
                           {n.type === "class_reminder" && (
-                            <Link href="/classes">
+                            <Link href="/classes" onClick={(e) => {
+                              e.stopPropagation();
+                              markRead.mutate({ id: n.id as number });
+                            }}>
                               <Button
                                 size="sm"
                                 className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1 rounded-md"
@@ -460,7 +532,10 @@ export default function NotificationsPage() {
                             </Link>
                           )}
                           {n.type === "private_message" && (
-                            <Link href="/messages">
+                            <Link href="/messages" onClick={(e) => {
+                              e.stopPropagation();
+                              markRead.mutate({ id: n.id as number });
+                            }}>
                               <Button
                                 size="sm"
                                 className="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1 rounded-md"
@@ -471,7 +546,10 @@ export default function NotificationsPage() {
                             </Link>
                           )}
                           {n.type === "payment" && (
-                            <Link href="/fees">
+                            <Link href="/fees" onClick={(e) => {
+                              e.stopPropagation();
+                              markRead.mutate({ id: n.id as number });
+                            }}>
                               <Button
                                 size="sm"
                                 className="bg-rose-600 hover:bg-rose-700 text-white text-xs px-3 py-1 rounded-md"
@@ -492,7 +570,10 @@ export default function NotificationsPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => markRead.mutate({ id: n.id as number })}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            markRead.mutate({ id: n.id as number });
+                          }}
                           disabled={markRead.isPending}
                           className="h-8 w-8 p-0 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50/50"
                           title="Mark read"
@@ -506,9 +587,10 @@ export default function NotificationsPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() =>
-                            dismissAnnouncement.mutate({ announcementId: (n as any).realId })
-                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            dismissAnnouncement.mutate({ announcementId: (n as any).realId });
+                          }}
                           disabled={dismissAnnouncement.isPending}
                           className="h-8 w-8 p-0 text-gray-400 hover:text-amber-600 hover:bg-amber-50/50"
                           title="Dismiss"
@@ -522,7 +604,10 @@ export default function NotificationsPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => deleteNotification.mutate({ id: n.id as number })}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteNotification.mutate({ id: n.id as number });
+                          }}
                           disabled={deleteNotification.isPending}
                           className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 hover:bg-red-50/50"
                           title="Delete"

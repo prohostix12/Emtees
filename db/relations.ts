@@ -29,6 +29,19 @@ import {
   teacherSalaryConfigAuditLogs,
   sessionAllocationLogs,
   oneToOneRescheduleRequests,
+  learningNotes,
+  learningVideos,
+  assignments,
+  assignmentSubmissions,
+  communityLessons,
+  communityPosts,
+  communityComments,
+  communityPostReactions,
+  communityCareers,
+  communitySavedCareers,
+  communitySuccessStories,
+  communityLessonViews,
+  communityActiveUsers,
 } from "./schema";
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -386,6 +399,155 @@ export const oneToOneRescheduleRequestsRelations = relations(oneToOneRescheduleR
     references: [users.id],
   }),
 }));
+
+export const learningNotesRelations = relations(learningNotes, ({ one }) => ({
+  module: one(modules, {
+    fields: [learningNotes.moduleId],
+    references: [modules.id],
+  }),
+  batch: one(batches, {
+    fields: [learningNotes.batchId],
+    references: [batches.id],
+  }),
+  uploader: one(users, {
+    fields: [learningNotes.uploadedBy],
+    references: [users.id],
+  }),
+}));
+
+export const learningVideosRelations = relations(learningVideos, ({ one }) => ({
+  student: one(users, {
+    fields: [learningVideos.studentId],
+    references: [users.id],
+  }),
+  batch: one(batches, {
+    fields: [learningVideos.batchId],
+    references: [batches.id],
+  }),
+  teacher: one(users, {
+    fields: [learningVideos.teacherId],
+    references: [users.id],
+  }),
+  module: one(modules, {
+    fields: [learningVideos.moduleId],
+    references: [modules.id],
+  }),
+  uploader: one(users, {
+    fields: [learningVideos.uploadedBy],
+    references: [users.id],
+  }),
+}));
+
+export const assignmentsRelations = relations(assignments, ({ one, many }) => ({
+  module: one(modules, {
+    fields: [assignments.moduleId],
+    references: [modules.id],
+  }),
+  batch: one(batches, {
+    fields: [assignments.batchId],
+    references: [batches.id],
+  }),
+  creator: one(users, {
+    fields: [assignments.createdBy],
+    references: [users.id],
+  }),
+  submissions: many(assignmentSubmissions),
+}));
+
+export const assignmentSubmissionsRelations = relations(assignmentSubmissions, ({ one }) => ({
+  student: one(users, {
+    fields: [assignmentSubmissions.studentId],
+    references: [users.id],
+  }),
+  assignment: one(assignments, {
+    fields: [assignmentSubmissions.assignmentId],
+    references: [assignments.id],
+  }),
+}));
+
+export const communityLessonsRelations = relations(communityLessons, ({ one, many }) => ({
+  publisher: one(users, {
+    fields: [communityLessons.publishedBy],
+    references: [users.id],
+  }),
+  views: many(communityLessonViews),
+}));
+
+export const communityPostsRelations = relations(communityPosts, ({ one, many }) => ({
+  author: one(users, {
+    fields: [communityPosts.authorId],
+    references: [users.id],
+  }),
+  comments: many(communityComments),
+  reactions: many(communityPostReactions),
+}));
+
+export const communityCommentsRelations = relations(communityComments, ({ one }) => ({
+  post: one(communityPosts, {
+    fields: [communityComments.postId],
+    references: [communityPosts.id],
+  }),
+  author: one(users, {
+    fields: [communityComments.authorId],
+    references: [users.id],
+  }),
+}));
+
+export const communityPostReactionsRelations = relations(communityPostReactions, ({ one }) => ({
+  post: one(communityPosts, {
+    fields: [communityPostReactions.postId],
+    references: [communityPosts.id],
+  }),
+  user: one(users, {
+    fields: [communityPostReactions.userId],
+    references: [users.id],
+  }),
+}));
+
+export const communityCareersRelations = relations(communityCareers, ({ one, many }) => ({
+  publisher: one(users, {
+    fields: [communityCareers.publishedBy],
+    references: [users.id],
+  }),
+  savedBy: many(communitySavedCareers),
+}));
+
+export const communitySavedCareersRelations = relations(communitySavedCareers, ({ one }) => ({
+  user: one(users, {
+    fields: [communitySavedCareers.userId],
+    references: [users.id],
+  }),
+  career: one(communityCareers, {
+    fields: [communitySavedCareers.careerId],
+    references: [communityCareers.id],
+  }),
+}));
+
+export const communitySuccessStoriesRelations = relations(communitySuccessStories, ({ one }) => ({
+  publisher: one(users, {
+    fields: [communitySuccessStories.publishedBy],
+    references: [users.id],
+  }),
+}));
+
+export const communityLessonViewsRelations = relations(communityLessonViews, ({ one }) => ({
+  lesson: one(communityLessons, {
+    fields: [communityLessonViews.lessonId],
+    references: [communityLessons.id],
+  }),
+  user: one(users, {
+    fields: [communityLessonViews.userId],
+    references: [users.id],
+  }),
+}));
+
+export const communityActiveUsersRelations = relations(communityActiveUsers, ({ one }) => ({
+  user: one(users, {
+    fields: [communityActiveUsers.userId],
+    references: [users.id],
+  }),
+}));
+
 
 
 

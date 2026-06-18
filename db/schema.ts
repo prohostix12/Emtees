@@ -450,10 +450,13 @@ export const violations = pgTable("violations", {
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
   reportedBy: bigint("reported_by", { mode: "number" }).references(() => users.id, { onDelete: "set null" }),
-  type: varchar("type", { length: 100 }).notNull(),
+  type: varchar("type", { length: 100 }).notNull(), // Kept for backward compatibility
   description: text("description").notNull(),
-  action: varchar("action", { length: 100 }),
-  status: varchar("status", { length: 20 }).default("open"),
+  action: varchar("action", { length: 100 }), // Kept for backward compatibility
+  status: varchar("status", { length: 20 }).default("active").notNull(), // 'active' | 'resolved'
+  batch: varchar("batch", { length: 255 }),
+  level: varchar("level", { length: 50 }).notNull().default("Warning"), // 'Warning' | 'Final Warning' | 'Suspension'
+  reason: varchar("reason", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   resolvedAt: timestamp("resolved_at"),
 });
@@ -671,6 +674,260 @@ export const systemSettings = pgTable("system_settings", {
 
 export type SystemSetting = typeof systemSettings.$inferSelect;
 export type InsertSystemSetting = typeof systemSettings.$inferInsert;
+
+// Learning Notes
+export const learningNotes = pgTable("learning_notes", {
+  id: serial("id").primaryKey(),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  moduleId: bigint("module_id", { mode: "number" })
+    .notNull()
+    .references(() => modules.id, { onDelete: "cascade" }),
+  batchId: bigint("batch_id", { mode: "number" })
+    .notNull()
+    .references(() => batches.id, { onDelete: "cascade" }),
+  fileType: varchar("file_type", { length: 50 }).notNull(), // 'pdf', 'docx', 'ppt', 'pptx'
+  uploadedBy: bigint("uploaded_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  fileUrl: text("file_url").notNull(), // contains the base64 or file URL
+  uploadDate: timestamp("upload_date").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Learning Videos
+export const learningVideos = pgTable("learning_videos", {
+  id: serial("id").primaryKey(),
+  sessionType: varchar("session_type", { length: 20 }).notNull(), // 'one_to_one' | 'group'
+  studentId: bigint("student_id", { mode: "number" })
+    .references(() => users.id, { onDelete: "cascade" }), // nullable for group
+  batchId: bigint("batch_id", { mode: "number" })
+    .references(() => batches.id, { onDelete: "cascade" }), // nullable for 1-to-1
+  teacherId: bigint("teacher_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  moduleId: bigint("module_id", { mode: "number" })
+    .notNull()
+    .references(() => modules.id, { onDelete: "cascade" }),
+  sessionDate: timestamp("session_date").notNull(),
+  duration: integer("duration").notNull(), // duration in minutes
+  videoUrl: text("video_url").notNull(),
+  thumbnailUrl: text("thumbnail_url"),
+  uploadedBy: bigint("uploaded_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Assignments
+export const assignments = pgTable("assignments", {
+  id: serial("id").primaryKey(),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  moduleId: bigint("module_id", { mode: "number" })
+    .notNull()
+    .references(() => modules.id, { onDelete: "cascade" }),
+  batchId: bigint("batch_id", { mode: "number" })
+    .notNull()
+    .references(() => batches.id, { onDelete: "cascade" }),
+  dueDate: timestamp("due_date").notNull(),
+  attachmentUrl: text("attachment_url"),
+  attachmentName: varchar("attachment_name", { length: 255 }),
+  createdBy: bigint("created_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Assignment Submissions
+export const assignmentSubmissions = pgTable("assignment_submissions", {
+  id: serial("id").primaryKey(),
+  studentId: bigint("student_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  assignmentId: bigint("assignment_id", { mode: "number" })
+    .notNull()
+    .references(() => assignments.id, { onDelete: "cascade" }),
+  submissionFileUrl: text("submission_file_url").notNull(),
+  submissionFileName: varchar("submission_file_name", { length: 255 }),
+  submittedDate: timestamp("submitted_date").defaultNow().notNull(),
+  marks: integer("marks"),
+  feedback: text("feedback"),
+  status: varchar("status", { length: 50 }).notNull().default("Submitted"), // 'Submitted', 'Reviewed', 'Completed'
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type LearningNote = typeof learningNotes.$inferSelect;
+export type InsertLearningNote = typeof learningNotes.$inferInsert;
+export type LearningVideo = typeof learningVideos.$inferSelect;
+export type InsertLearningVideo = typeof learningVideos.$inferInsert;
+export type Assignment = typeof assignments.$inferSelect;
+export type InsertAssignment = typeof assignments.$inferInsert;
+export type AssignmentSubmission = typeof assignmentSubmissions.$inferSelect;
+export type InsertAssignmentSubmission = typeof assignmentSubmissions.$inferInsert;
+
+// Community Lessons
+export const communityLessons = pgTable("community_lessons", {
+  id: serial("id").primaryKey(),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  type: varchar("type", { length: 50 }).notNull(), // 'pdf' | 'docx' | 'ppt' | 'pptx' | 'video' | 'youtube' | 'text'
+  contentUrl: text("content_url"), // base64 or video url
+  youtubeUrl: varchar("youtube_url", { length: 255 }),
+  textContent: text("text_content"),
+  fileName: varchar("file_name", { length: 255 }),
+  publishedBy: bigint("published_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  publishedAt: timestamp("published_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Community Discussion Posts
+export const communityPosts = pgTable("community_posts", {
+  id: serial("id").primaryKey(),
+  title: varchar("title", { length: 255 }),
+  content: text("content").notNull(),
+  authorId: bigint("author_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  isPinned: boolean("is_pinned").default(false).notNull(),
+  mediaUrl: text("media_url"),
+  mediaName: varchar("media_name", { length: 255 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Community Comments (including nested replies)
+export const communityComments = pgTable("community_comments", {
+  id: serial("id").primaryKey(),
+  postId: bigint("post_id", { mode: "number" })
+    .notNull()
+    .references(() => communityPosts.id, { onDelete: "cascade" }),
+  authorId: bigint("author_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  content: text("content").notNull(),
+  parentId: integer("parent_id"), // self-reference using raw integer to avoid circular type ref in drizzle schemas
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Community Post Reactions (Likes)
+export const communityPostReactions = pgTable(
+  "community_post_reactions",
+  {
+    id: serial("id").primaryKey(),
+    postId: bigint("post_id", { mode: "number" })
+      .notNull()
+      .references(() => communityPosts.id, { onDelete: "cascade" }),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reaction: varchar("reaction", { length: 50 }).notNull().default("like"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    uniquePostUserReaction: uniqueIndex("unique_post_user_reaction_idx").on(table.postId, table.userId),
+  })
+);
+
+// Community Career Opportunities
+export const communityCareers = pgTable("community_careers", {
+  id: serial("id").primaryKey(),
+  title: varchar("title", { length: 255 }).notNull(),
+  company: varchar("company", { length: 255 }).notNull(),
+  type: varchar("type", { length: 100 }).notNull(), // 'Job' | 'Internship' | 'Freelance' | 'Guidance'
+  location: varchar("location", { length: 255 }).notNull(),
+  description: text("description").notNull(),
+  link: varchar("link", { length: 500 }),
+  publishedBy: bigint("published_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Community Saved Career Opportunities
+export const communitySavedCareers = pgTable(
+  "community_saved_careers",
+  {
+    id: serial("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    careerId: bigint("career_id", { mode: "number" })
+      .notNull()
+      .references(() => communityCareers.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    uniqueUserCareer: uniqueIndex("unique_user_career_idx").on(table.userId, table.careerId),
+  })
+);
+
+// Community Student Success Stories
+export const communitySuccessStories = pgTable("community_success_stories", {
+  id: serial("id").primaryKey(),
+  studentName: varchar("student_name", { length: 255 }).notNull(),
+  courseCompleted: varchar("course_completed", { length: 255 }).notNull(),
+  achievement: text("achievement").notNull(),
+  photoUrl: text("photo_url"),
+  testimonial: text("testimonial").notNull(),
+  publishedBy: bigint("published_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Community Lesson Views (for analytics)
+export const communityLessonViews = pgTable(
+  "community_lesson_views",
+  {
+    id: serial("id").primaryKey(),
+    lessonId: bigint("lesson_id", { mode: "number" })
+      .notNull()
+      .references(() => communityLessons.id, { onDelete: "cascade" }),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    viewedAt: timestamp("viewed_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    uniqueLessonUserView: uniqueIndex("unique_lesson_user_view_idx").on(table.lessonId, table.userId),
+  })
+);
+
+// Community Daily Active Users (for analytics)
+export const communityActiveUsers = pgTable(
+  "community_active_users",
+  {
+    id: serial("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    activeDate: varchar("active_date", { length: 10 }).notNull(), // 'YYYY-MM-DD'
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    uniqueUserActiveDate: uniqueIndex("unique_user_active_date_idx").on(table.userId, table.activeDate),
+  })
+);
+
+export type CommunityLesson = typeof communityLessons.$inferSelect;
+export type InsertCommunityLesson = typeof communityLessons.$inferInsert;
+export type CommunityPost = typeof communityPosts.$inferSelect;
+export type InsertCommunityPost = typeof communityPosts.$inferInsert;
+export type CommunityComment = typeof communityComments.$inferSelect;
+export type InsertCommunityComment = typeof communityComments.$inferInsert;
+export type CommunityPostReaction = typeof communityPostReactions.$inferSelect;
+export type InsertCommunityPostReaction = typeof communityPostReactions.$inferInsert;
+export type CommunityCareer = typeof communityCareers.$inferSelect;
+export type InsertCommunityCareer = typeof communityCareers.$inferInsert;
+export type CommunitySavedCareer = typeof communitySavedCareers.$inferSelect;
+export type InsertCommunitySavedCareer = typeof communitySavedCareers.$inferInsert;
+export type CommunitySuccessStory = typeof communitySuccessStories.$inferSelect;
+export type InsertCommunitySuccessStory = typeof communitySuccessStories.$inferInsert;
+export type CommunityLessonView = typeof communityLessonViews.$inferSelect;
+export type CommunityActiveUser = typeof communityActiveUsers.$inferSelect;
+
 
 
 

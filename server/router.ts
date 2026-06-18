@@ -7,6 +7,8 @@ import { adminRouter } from "./routers/admin";
 import { studentRouter } from "./routers/student";
 import { privateMessageRouter } from "./routers/privateMessages";
 import { notificationRouter } from "./routers/notifications";
+import { communityRouter } from "./routers/community";
+import { disciplineRouter } from "./routers/discipline";
 
 export const appRouter = createRouter({
   ping: publicQuery.query(() => ({ ok: true, ts: Date.now() })),
@@ -18,6 +20,8 @@ export const appRouter = createRouter({
   student: studentRouter,
   privateMessage: privateMessageRouter,
   notification: notificationRouter,
+  community: communityRouter,
+  discipline: disciplineRouter,
 });
 
 export type AppRouter = typeof appRouter;
