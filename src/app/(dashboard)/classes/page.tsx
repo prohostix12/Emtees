@@ -1,7 +1,14 @@
 "use client";
 
-import Classes from "@/pages/Classes";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 export default function Page() {
-  return <Classes />;
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace("/classes/group");
+  }, [router]);
+
+  return null;
 }

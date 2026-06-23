@@ -582,7 +582,7 @@ export default function FeesPage() {
                           <TableRow key={p.id}>
                             <TableCell>
                               <div className="font-semibold">{p.student?.name}</div>
-                              <div className="text-[10px] text-gray-400 font-mono">ID: {p.student?.unionId}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">ID: {p.student?.profile?.enrollmentId || p.student?.unionId}</div>
                             </TableCell>
                             <TableCell>
                               <div>{p.batch?.name || "-"}</div>
@@ -642,7 +642,7 @@ export default function FeesPage() {
                           <TableRow key={o.id}>
                             <TableCell>
                               <div className="font-semibold">{o.user?.name}</div>
-                              <div className="text-[10px] text-gray-400 font-mono">ID: {o.user?.unionId}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">ID: {o.enrollmentId || o.user?.unionId}</div>
                             </TableCell>
                             <TableCell>{o.course || "-"}</TableCell>
                             <TableCell>{o.batch || "-"}</TableCell>

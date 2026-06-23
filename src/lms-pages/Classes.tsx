@@ -16,7 +16,7 @@ import { Plus, Play, Square, Video, Calendar, Clock, XCircle, ClipboardList, Edi
 import dynamic from "next/dynamic";
 const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
 
-export default function ClassesPage() {
+export default function ClassesPage({ type }: { type?: "group" | "one-to-one" }) {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -99,7 +99,7 @@ export default function ClassesPage() {
     const search = studentSearch.toLowerCase();
     return (
       std.name.toLowerCase().includes(search) ||
-      std.unionId.toLowerCase().includes(search) ||
+      (std.profile?.enrollmentId || std.unionId).toLowerCase().includes(search) ||
       String(std.id).includes(search)
     );
   }) || [];
@@ -382,7 +382,7 @@ export default function ClassesPage() {
     const teacherName = session.teacher?.name || "";
     const teacherUnionId = session.teacher?.unionId || "";
     const studentName = session.student?.name || "";
-    const studentUnionId = session.student?.unionId || "";
+    const studentUnionId = session.student?.profile?.enrollmentId || session.student?.unionId || "";
     
     setTeacherSearch(teacherName ? `${teacherName} (${teacherUnionId || `ID: ${session.teacherId}`})` : "");
     setStudentSearch(studentName ? `${studentName} (${studentUnionId || `ID: ${session.studentId}`})` : "");
@@ -575,7 +575,7 @@ export default function ClassesPage() {
                                         <TableRow key={record.id} className="hover:bg-gray-50/50">
                                           <TableCell className="py-2 text-xs">
                                             <div className="font-medium text-gray-800">{record.student?.name}</div>
-                                            <div className="text-[10px] text-gray-400 font-mono">{record.student?.unionId}</div>
+                                            <div className="text-[10px] text-gray-400 font-mono">{record.student?.profile?.enrollmentId || record.student?.unionId}</div>
                                           </TableCell>
                                           <TableCell className="py-2 text-center text-xs">
                                             <Badge
@@ -809,6 +809,210 @@ export default function ClassesPage() {
     );
   };
 
+  const renderOneToOneList = () => {
+    return (
+      <Card className="border border-gray-100">
+        <CardContent className="p-0 overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Session Details</TableHead>
+                <TableHead>Teacher</TableHead>
+                <TableHead>Student</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Scheduled</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {oneToOneQuery.data?.map((s) => (
+                <TableRow key={s.id} className="align-top hover:bg-gray-50/50">
+                  <TableCell className="font-semibold text-gray-800 text-sm">
+                    <div>{s.title || "1-to-1 Session"}</div>
+                    {s.status === "completed" && (
+                      <div className="text-[11px] text-gray-500 mt-2 space-y-1 border-t pt-2 max-w-xs leading-relaxed font-normal">
+                        <div>⏱️ <b>Actual:</b> {s.startedAt ? new Date(s.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-"} - {s.endedAt ? new Date(s.endedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-"}</div>
+                        <div>⏳ <b>Conducted:</b> {s.actualDuration !== null ? `${s.actualDuration} min` : "-"}</div>
+                        <div className="flex gap-2.5 mt-1">
+                          <span>👩‍🏫 Teacher: <Badge variant={s.teacherAttendance === "present" ? "default" : "destructive"} className="text-[9px] px-1 py-0 font-normal uppercase">{s.teacherAttendance || "absent"}</Badge></span>
+                          <span>🎓 Student: <Badge variant={s.studentAttendance === "present" ? "default" : "destructive"} className="text-[9px] px-1 py-0 font-normal uppercase">{s.studentAttendance || "absent"}</Badge></span>
+                        </div>
+                        {s.remarks && <div className="text-gray-400 italic text-[10px] mt-1 font-serif">"{s.remarks}"</div>}
+                      </div>
+                    )}
+                    {s.status !== "completed" && s.remarks && (
+                      <div className="text-[11px] text-gray-400 font-light mt-1 max-w-xs truncate">Note: "{s.remarks}"</div>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm">{s.teacher?.name || "-"}</TableCell>
+                  <TableCell className="text-sm">{s.student?.name || "-"}</TableCell>
+                  <TableCell className="text-sm">{s.sessionLength} min</TableCell>
+                  <TableCell className="text-sm">{s.scheduledAt ? new Date(s.scheduledAt).toLocaleString() : "-"}</TableCell>
+                  <TableCell className="text-sm">
+                    <div className="flex flex-col gap-1">
+                      {s.status === "ongoing" ? (
+                        <Badge className="bg-red-500 text-white animate-pulse w-fit">🔴 Live</Badge>
+                      ) : s.status === "reschedule_request_pending" ? (
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px] w-fit font-medium">
+                          Reschedule Request Pending
+                        </Badge>
+                      ) : (
+                        <Badge variant={s.status === "completed" ? "default" : s.status === "rescheduled" ? "secondary" : "outline"} className="w-fit">
+                          {s.status}
+                        </Badge>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {/* JOIN BUTTON FOR STUDENT */}
+                      {user?.role === "student" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled
+                          className="bg-gray-100 text-gray-400 cursor-not-allowed text-xs"
+                        >
+                          Waiting for Teacher
+                        </Button>
+                      )}
+                      {user?.role === "student" && s.status === "ongoing" && (
+                        <Button
+                          size="sm"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                          onClick={() => handleJoinOneToOne(s)}
+                          disabled={joinOneToOne.isPending}
+                        >
+                          <Video className="w-3.5 h-3.5 mr-1" /> Join Class
+                        </Button>
+                      )}
+
+                      {/* TEACHER ACTIONS */}
+                      {user?.role === "teacher" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (() => {
+                        const pendingRequest = s.rescheduleRequests?.find((r: any) => r.status === "pending");
+                        const isUpcoming = new Date() < new Date(s.scheduledAt);
+                        const isReschedulePending = s.status === "reschedule_request_pending" || !!pendingRequest;
+                        return (
+                          <>
+                            <Button
+                              size="sm"
+                              className="bg-green-600 hover:bg-green-700 text-white text-xs"
+                              onClick={() => handleStartOneToOne(s)}
+                              disabled={startOneToOne.isPending}
+                            >
+                              <Play className="w-3.5 h-3.5 mr-1" /> Start
+                            </Button>
+                            {isUpcoming && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs border-gray-200"
+                                onClick={() => handleOpenTeacherReschedule(s)}
+                                disabled={isReschedulePending}
+                              >
+                                <Calendar className="w-3.5 h-3.5 mr-1 text-gray-500" />
+                                {isReschedulePending ? "Reschedule Pending" : "Request Reschedule"}
+                              </Button>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {user?.role === "teacher" && s.status === "ongoing" && (
+                        <>
+                          <Button
+                            size="sm"
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                            onClick={() => handleJoinOneToOne(s)}
+                            disabled={joinOneToOne.isPending}
+                          >
+                            <Video className="w-3.5 h-3.5 mr-1" /> Join
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            className="text-xs"
+                            onClick={() => endOneToOne.mutate({ sessionId: s.id })}
+                            disabled={endOneToOne.isPending}
+                          >
+                            <Square className="w-3.5 h-3.5 mr-1" /> End
+                          </Button>
+                        </>
+                      )}
+
+                      {/* SUPER ADMIN ACTIONS */}
+                      {isSuperAdmin && (
+                        <>
+                          {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending" || s.status === "ongoing") && (
+                            <Button
+                              size="sm"
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                              onClick={() => handleJoinOneToOne(s)}
+                              disabled={joinOneToOne.isPending}
+                            >
+                              <Video className="w-3.5 h-3.5 mr-1" /> Join
+                            </Button>
+                          )}
+                          {s.status === "ongoing" && (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="text-xs"
+                              onClick={() => endOneToOne.mutate({ sessionId: s.id })}
+                              disabled={endOneToOne.isPending}
+                            >
+                              <Square className="w-3.5 h-3.5 mr-1" /> End
+                            </Button>
+                          )}
+                          {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs border-gray-200"
+                                onClick={() => handleOpenEditOto(s)}
+                              >
+                                <Edit3 className="w-3.5 h-3.5 mr-1 text-gray-500" /> Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs border-gray-200"
+                                onClick={() => handleOpenRescheduleOto(s)}
+                              >
+                                <Calendar className="w-3.5 h-3.5 mr-1 text-gray-500" /> Reschedule
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-100 text-xs"
+                                onClick={() => cancelOneToOne.mutate({ sessionId: s.id })}
+                                disabled={cancelOneToOne.isPending}
+                              >
+                                <XCircle className="w-3.5 h-3.5 mr-1" /> Cancel
+                              </Button>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {(!oneToOneQuery.data || oneToOneQuery.data.length === 0) && (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-gray-400 py-10 text-xs">
+                    No 1-to-1 sessions found.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    );
+  };
+
   return (
     <>
       {/* Jitsi fullscreen overlay */}
@@ -842,8 +1046,11 @@ export default function ClassesPage() {
 
       <div className="space-y-6">
         <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-gray-800">Classes & Sessions</h3>
-          {canManageClasses && (
+          <h3 className="text-lg font-semibold text-gray-800">
+            {type === "group" ? "Group Sessions" : type === "one-to-one" ? "1-on-1 Sessions" : "Classes & Sessions"}
+          </h3>
+          {/* Header Action Button */}
+          {(!type || type === "group") && canManageClasses && (
             <Dialog open={open} onOpenChange={setOpen}>
               <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreate}>
                 <Plus className="w-4 h-4 mr-2" /> Schedule Class
@@ -856,25 +1063,337 @@ export default function ClassesPage() {
               </DialogContent>
             </Dialog>
           )}
+          {type === "one-to-one" && isSuperAdmin && (
+            <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
+              <Plus className="w-4 h-4 mr-2" /> New Session
+            </Button>
+          )}
         </div>
 
-        {/* Edit Dialog */}
-        <Dialog open={editOpen} onOpenChange={setEditOpen}>
-          <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
-            <DialogHeader>
-              <DialogTitle className="text-base font-bold text-gray-800">Edit Class Details</DialogTitle>
-            </DialogHeader>
-            {scheduleFormContent(handleSubmitEdit, "Update Live Class")}
-          </DialogContent>
-        </Dialog>
+        {/* Edit Dialog (Group Class) */}
+        {(!type || type === "group") && (
+          <Dialog open={editOpen} onOpenChange={setEditOpen}>
+            <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
+              <DialogHeader>
+                <DialogTitle className="text-base font-bold text-gray-800">Edit Class Details</DialogTitle>
+              </DialogHeader>
+              {scheduleFormContent(handleSubmitEdit, "Update Live Class")}
+            </DialogContent>
+          </Dialog>
+        )}
 
-        <Tabs defaultValue="classes">
-          <TabsList className="bg-gray-100 dark:bg-slate-900 border p-1 rounded-lg">
-            <TabsTrigger value="classes">Classes</TabsTrigger>
-            {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && <TabsTrigger value="one-to-one">1-on-1 Sessions</TabsTrigger>}
-          </TabsList>
+        {/* 1-on-1 Dialogs (Only rendered if type is not group) */}
+        {(!type || type === "one-to-one") && (
+          <>
+            {/* Create 1-on-1 Modal */}
+            <Dialog open={otoOpen} onOpenChange={setOtoOpen}>
+              <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
+                <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Create 1-on-1 Session</DialogTitle></DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (otoForm.teacherId === 0 || otoForm.studentId === 0) {
+                    toast.error("Please select a student and teacher.");
+                    return;
+                  }
+                  createOneToOne.mutate({
+                    ...otoForm,
+                    scheduledAt: new Date(otoForm.scheduledAt),
+                  });
+                }} className="space-y-3 mt-2 text-left">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Session Title</label>
+                    <Input placeholder="Session Title" value={otoForm.title} onChange={(e) => setOtoForm({ ...otoForm, title: e.target.value })} required />
+                  </div>
+                  {/* SEARCHABLE TEACHER DROPDOWN */}
+                  <div className="space-y-1 relative" ref={teacherDropdownRef}>
+                    <label className="text-xs font-medium text-gray-700">Select Teacher</label>
+                    <Input
+                      placeholder="Search teacher by name or ID..."
+                      value={teacherSearch}
+                      onChange={(e) => {
+                        setTeacherSearch(e.target.value);
+                        setShowTeacherDropdown(true);
+                        setOtoForm(prev => ({ ...prev, teacherId: 0 }));
+                      }}
+                      onFocus={() => setShowTeacherDropdown(true)}
+                      className="w-full bg-white border"
+                    />
+                    {showTeacherDropdown && (
+                      <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
+                        {filteredTeachers.length === 0 ? (
+                          <div className="p-2.5 text-xs text-gray-400">No teachers found</div>
+                        ) : (
+                          filteredTeachers.map((t) => (
+                            <div
+                              key={t.id}
+                              onClick={() => {
+                                setOtoForm(prev => ({ ...prev, teacherId: t.id }));
+                                setTeacherSearch(`${t.name} (${t.unionId || `ID: ${t.id}`})`);
+                                setShowTeacherDropdown(false);
+                              }}
+                              className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
+                            >
+                              <div className="font-semibold text-gray-800">{t.name}</div>
+                              <div className="text-[10px] text-gray-500 font-mono">ID: {t.id} | Union ID: {t.unionId || "-"}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
 
-          <TabsContent value="classes">
+                  {/* SEARCHABLE STUDENT DROPDOWN */}
+                  <div className="space-y-1 relative" ref={studentDropdownRef}>
+                    <label className="text-xs font-medium text-gray-700">Select Student</label>
+                    <Input
+                      placeholder="Search student by name or ID..."
+                      value={studentSearch}
+                      onChange={(e) => {
+                        setStudentSearch(e.target.value);
+                        setShowStudentDropdown(true);
+                        setOtoForm(prev => ({ ...prev, studentId: 0 }));
+                      }}
+                      onFocus={() => setShowStudentDropdown(true)}
+                      className="w-full bg-white border"
+                    />
+                    {showStudentDropdown && (
+                      <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
+                        {filteredStudents.length === 0 ? (
+                          <div className="p-2.5 text-xs text-gray-400">No students found</div>
+                        ) : (
+                          filteredStudents.map((std) => (
+                            <div
+                              key={std.id}
+                              onClick={() => {
+                                setOtoForm(prev => ({ ...prev, studentId: std.id }));
+                                setStudentSearch(`${std.name} (${std.profile?.enrollmentId || std.unionId || `ID: ${std.id}`})`);
+                                setShowStudentDropdown(false);
+                              }}
+                              className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
+                            >
+                              <div className="font-semibold text-gray-800">{std.name}</div>
+                              <div className="text-[10px] text-gray-500 font-mono">ID: {std.id} | Student ID: {std.profile?.enrollmentId || std.unionId || "-"}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
+                    <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Class Start Date & Time</label>
+                    <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Session Notes (optional)</label>
+                    <Input placeholder="Session notes..." value={otoForm.remarks} onChange={(e) => setOtoForm({ ...otoForm, remarks: e.target.value })} />
+                  </div>
+                  <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={createOneToOne.isPending}>
+                    {createOneToOne.isPending ? "Creating..." : "Create Session"}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+
+            {/* Edit 1-on-1 Modal */}
+            <Dialog open={otoEditOpen} onOpenChange={setOtoEditOpen}>
+              <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
+                <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Edit 1-on-1 Session</DialogTitle></DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!selectedOtoSession) return;
+                  editOneToOne.mutate({
+                    sessionId: selectedOtoSession.id,
+                    teacherId: otoForm.teacherId,
+                    studentId: otoForm.studentId,
+                    title: otoForm.title,
+                    sessionLength: otoForm.sessionLength,
+                    scheduledAt: new Date(otoForm.scheduledAt),
+                    remarks: otoForm.remarks,
+                  });
+                }} className="space-y-3 mt-2 text-left">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Session Title</label>
+                    <Input placeholder="Session Title" value={otoForm.title} onChange={(e) => setOtoForm({ ...otoForm, title: e.target.value })} required />
+                  </div>
+                  {/* SEARCHABLE TEACHER DROPDOWN */}
+                  <div className="space-y-1 relative" ref={teacherDropdownRef}>
+                    <label className="text-xs font-medium text-gray-700">Select Teacher</label>
+                    <Input
+                      placeholder="Search teacher by name or ID..."
+                      value={teacherSearch}
+                      onChange={(e) => {
+                        setTeacherSearch(e.target.value);
+                        setShowTeacherDropdown(true);
+                        setOtoForm(prev => ({ ...prev, teacherId: 0 }));
+                      }}
+                      onFocus={() => setShowTeacherDropdown(true)}
+                      className="w-full bg-white border"
+                    />
+                    {showTeacherDropdown && (
+                      <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
+                        {filteredTeachers.length === 0 ? (
+                          <div className="p-2.5 text-xs text-gray-400">No teachers found</div>
+                        ) : (
+                          filteredTeachers.map((t) => (
+                            <div
+                              key={t.id}
+                              onClick={() => {
+                                setOtoForm(prev => ({ ...prev, teacherId: t.id }));
+                                setTeacherSearch(`${t.name} (${t.unionId || `ID: ${t.id}`})`);
+                                setShowTeacherDropdown(false);
+                              }}
+                              className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
+                            >
+                              <div className="font-semibold text-gray-800">{t.name}</div>
+                              <div className="text-[10px] text-gray-500 font-mono">ID: {t.id} | Union ID: {t.unionId || "-"}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* SEARCHABLE STUDENT DROPDOWN */}
+                  <div className="space-y-1 relative" ref={studentDropdownRef}>
+                    <label className="text-xs font-medium text-gray-700">Select Student</label>
+                    <Input
+                      placeholder="Search student by name or ID..."
+                      value={studentSearch}
+                      onChange={(e) => {
+                        setStudentSearch(e.target.value);
+                        setShowStudentDropdown(true);
+                        setOtoForm(prev => ({ ...prev, studentId: 0 }));
+                      }}
+                      onFocus={() => setShowStudentDropdown(true)}
+                      className="w-full bg-white border"
+                    />
+                    {showStudentDropdown && (
+                      <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
+                        {filteredStudents.length === 0 ? (
+                          <div className="p-2.5 text-xs text-gray-400">No students found</div>
+                        ) : (
+                          filteredStudents.map((std) => (
+                            <div
+                              key={std.id}
+                              onClick={() => {
+                                setOtoForm(prev => ({ ...prev, studentId: std.id }));
+                                setStudentSearch(`${std.name} (${std.profile?.enrollmentId || std.unionId || `ID: ${std.id}`})`);
+                                setShowStudentDropdown(false);
+                              }}
+                              className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
+                            >
+                              <div className="font-semibold text-gray-800">{std.name}</div>
+                              <div className="text-[10px] text-gray-500 font-mono">ID: {std.id} | Student ID: {std.profile?.enrollmentId || std.unionId || "-"}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
+                    <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Class Start Date & Time</label>
+                    <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Session Notes (optional)</label>
+                    <Input placeholder="Session notes..." value={otoForm.remarks} onChange={(e) => setOtoForm({ ...otoForm, remarks: e.target.value })} />
+                  </div>
+                  <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={editOneToOne.isPending}>
+                    {editOneToOne.isPending ? "Updating..." : "Update Session"}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+
+            {/* Reschedule Modal */}
+            <Dialog open={rescheduleOpen} onOpenChange={setRescheduleOpen}>
+              <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
+                <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Reschedule 1-on-1 Session</DialogTitle></DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!selectedOtoSession) return;
+                  rescheduleOneToOne.mutate({
+                    sessionId: selectedOtoSession.id,
+                    scheduledAt: new Date(otoForm.scheduledAt),
+                    sessionLength: otoForm.sessionLength,
+                  });
+                }} className="space-y-3 mt-2 text-left">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">New Start Date & Time</label>
+                    <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
+                    <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
+                  </div>
+                  <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={rescheduleOneToOne.isPending}>
+                    {rescheduleOneToOne.isPending ? "Rescheduling..." : "Reschedule Session"}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+
+            {/* Teacher Request Reschedule Modal */}
+            <Dialog open={teacherRescheduleOpen} onOpenChange={setTeacherRescheduleOpen}>
+              <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
+                <DialogHeader>
+                  <DialogTitle className="text-base font-bold text-gray-800">Request 1-on-1 Reschedule</DialogTitle>
+                </DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!selectedOtoSession) return;
+                  requestReschedule.mutate({
+                    sessionId: selectedOtoSession.id,
+                    proposedScheduledAt: new Date(rescheduleForm.proposedScheduledAt),
+                    reason: rescheduleForm.reason,
+                  });
+                }} className="space-y-3 mt-2 text-left">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-2 font-light">
+                      Proposed reschedule request for <b>"{selectedOtoSession?.title || "1-to-1 Session"}"</b>.
+                      Your request will be submitted to the Super Admin for approval.
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Proposed New Date & Time *</label>
+                    <Input
+                      type="datetime-local"
+                      value={rescheduleForm.proposedScheduledAt}
+                      onChange={(e) => setRescheduleForm({ ...rescheduleForm, proposedScheduledAt: e.target.value })}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-700">Reason for Rescheduling *</label>
+                    <textarea
+                      className="w-full border rounded-lg px-3 py-2 text-sm bg-white border-gray-200 text-gray-850 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all outline-none"
+                      placeholder="Please explain why you need to reschedule this class..."
+                      value={rescheduleForm.reason}
+                      onChange={(e) => setRescheduleForm({ ...rescheduleForm, reason: e.target.value })}
+                      required
+                      rows={3}
+                    />
+                  </div>
+                  <Button type="submit" className="w-full bg-emerald-600 text-white font-medium mt-2" disabled={requestReschedule.isPending}>
+                    {requestReschedule.isPending ? "Submitting Request..." : "Submit Reschedule Request"}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </>
+        )}
+
+        {/* Views (Direct or Tabbed) */}
+        {type ? (
+          type === "group" ? (
             <Tabs defaultValue="active" className="w-full">
               <TabsList className="bg-slate-50 p-1 rounded-lg border max-w-md mb-4 mt-2">
                 <TabsTrigger value="active" className="text-xs py-1.5 px-3">Active & Scheduled</TabsTrigger>
@@ -895,523 +1414,63 @@ export default function ClassesPage() {
                 })()}
               </TabsContent>
             </Tabs>
-          </TabsContent>
+          ) : (
+            (isAdmin || isTeacher || isSuperAdmin || user?.role === "student") ? (
+              <div className="space-y-4">
+                {renderOneToOneList()}
+              </div>
+            ) : (
+              <div className="text-center text-gray-400 py-10 text-xs">
+                Not authorized to view 1-to-1 sessions.
+              </div>
+            )
+          )
+        ) : (
+          <Tabs defaultValue="classes">
+            <TabsList className="bg-gray-100 dark:bg-slate-900 border p-1 rounded-lg">
+              <TabsTrigger value="classes">Classes</TabsTrigger>
+              {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && <TabsTrigger value="one-to-one">1-on-1 Sessions</TabsTrigger>}
+            </TabsList>
 
-          {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && (
-            <TabsContent value="one-to-one">
-              <div className="space-y-4 mt-4">
-                {isSuperAdmin && (
-                  <div className="flex justify-end gap-2">
-                    <Dialog open={otoOpen} onOpenChange={setOtoOpen}>
+            <TabsContent value="classes">
+              <Tabs defaultValue="active" className="w-full">
+                <TabsList className="bg-slate-50 p-1 rounded-lg border max-w-md mb-4 mt-2">
+                  <TabsTrigger value="active" className="text-xs py-1.5 px-3">Active & Scheduled</TabsTrigger>
+                  <TabsTrigger value="history" className="text-xs py-1.5 px-3">Session History</TabsTrigger>
+                </TabsList>
+                
+                <TabsContent value="active" className="space-y-4">
+                  {(() => {
+                    const activeList = data?.filter((cls) => cls.status === "scheduled" || cls.status === "ongoing") || [];
+                    return renderClassesList(activeList);
+                  })()}
+                </TabsContent>
+                
+                <TabsContent value="history" className="space-y-4">
+                  {(() => {
+                    const historyList = data?.filter((cls) => cls.status === "completed" || cls.status === "cancelled") || [];
+                    return renderClassesList(historyList);
+                  })()}
+                </TabsContent>
+              </Tabs>
+            </TabsContent>
+
+            {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && (
+              <TabsContent value="one-to-one">
+                <div className="space-y-4 mt-4">
+                  {isSuperAdmin && (
+                    <div className="flex justify-end gap-2">
                       <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
                         <Plus className="w-4 h-4 mr-2" /> New Session
                       </Button>
-                      <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
-                        <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Create 1-on-1 Session</DialogTitle></DialogHeader>
-                        <form onSubmit={(e) => {
-                          e.preventDefault();
-                          if (otoForm.teacherId === 0 || otoForm.studentId === 0) {
-                            toast.error("Please select a student and teacher.");
-                            return;
-                          }
-                          createOneToOne.mutate({
-                            ...otoForm,
-                            scheduledAt: new Date(otoForm.scheduledAt),
-                          });
-                        }} className="space-y-3 mt-2 text-left">
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Session Title</label>
-                            <Input placeholder="Session Title" value={otoForm.title} onChange={(e) => setOtoForm({ ...otoForm, title: e.target.value })} required />
-                          </div>
-                          {/* SEARCHABLE TEACHER DROPDOWN */}
-                          <div className="space-y-1 relative" ref={teacherDropdownRef}>
-                            <label className="text-xs font-medium text-gray-700">Select Teacher</label>
-                            <Input
-                              placeholder="Search teacher by name or ID..."
-                              value={teacherSearch}
-                              onChange={(e) => {
-                                setTeacherSearch(e.target.value);
-                                setShowTeacherDropdown(true);
-                                setOtoForm(prev => ({ ...prev, teacherId: 0 }));
-                              }}
-                              onFocus={() => setShowTeacherDropdown(true)}
-                              className="w-full bg-white border"
-                            />
-                            {showTeacherDropdown && (
-                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                                {filteredTeachers.length === 0 ? (
-                                  <div className="p-2.5 text-xs text-gray-400">No teachers found</div>
-                                ) : (
-                                  filteredTeachers.map((t) => (
-                                    <div
-                                      key={t.id}
-                                      onClick={() => {
-                                        setOtoForm(prev => ({ ...prev, teacherId: t.id }));
-                                        setTeacherSearch(`${t.name} (${t.unionId || `ID: ${t.id}`})`);
-                                        setShowTeacherDropdown(false);
-                                      }}
-                                      className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
-                                    >
-                                      <div className="font-semibold text-gray-800">{t.name}</div>
-                                      <div className="text-[10px] text-gray-500 font-mono">ID: {t.id} | Union ID: {t.unionId || "-"}</div>
-                                    </div>
-                                  ))
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* SEARCHABLE STUDENT DROPDOWN */}
-                          <div className="space-y-1 relative" ref={studentDropdownRef}>
-                            <label className="text-xs font-medium text-gray-700">Select Student</label>
-                            <Input
-                              placeholder="Search student by name or ID..."
-                              value={studentSearch}
-                              onChange={(e) => {
-                                setStudentSearch(e.target.value);
-                                setShowStudentDropdown(true);
-                                setOtoForm(prev => ({ ...prev, studentId: 0 }));
-                              }}
-                              onFocus={() => setShowStudentDropdown(true)}
-                              className="w-full bg-white border"
-                            />
-                            {showStudentDropdown && (
-                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                                {filteredStudents.length === 0 ? (
-                                  <div className="p-2.5 text-xs text-gray-400">No students found</div>
-                                ) : (
-                                  filteredStudents.map((std) => (
-                                    <div
-                                      key={std.id}
-                                      onClick={() => {
-                                        setOtoForm(prev => ({ ...prev, studentId: std.id }));
-                                        setStudentSearch(`${std.name} (${std.unionId || `ID: ${std.id}`})`);
-                                        setShowStudentDropdown(false);
-                                      }}
-                                      className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
-                                    >
-                                      <div className="font-semibold text-gray-800">{std.name}</div>
-                                      <div className="text-[10px] text-gray-500 font-mono">ID: {std.id} | Union ID: {std.unionId || "-"}</div>
-                                    </div>
-                                  ))
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
-                            <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Class Start Date & Time</label>
-                            <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Session Notes (optional)</label>
-                            <Input placeholder="Session notes..." value={otoForm.remarks} onChange={(e) => setOtoForm({ ...otoForm, remarks: e.target.value })} />
-                          </div>
-                          <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={createOneToOne.isPending}>
-                            {createOneToOne.isPending ? "Creating..." : "Create Session"}
-                          </Button>
-                        </form>
-                      </DialogContent>
-                    </Dialog>
-
-                    {/* Edit Modal */}
-                    <Dialog open={otoEditOpen} onOpenChange={setOtoEditOpen}>
-                      <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
-                        <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Edit 1-on-1 Session</DialogTitle></DialogHeader>
-                        <form onSubmit={(e) => {
-                          e.preventDefault();
-                          if (!selectedOtoSession) return;
-                          editOneToOne.mutate({
-                            sessionId: selectedOtoSession.id,
-                            teacherId: otoForm.teacherId,
-                            studentId: otoForm.studentId,
-                            title: otoForm.title,
-                            sessionLength: otoForm.sessionLength,
-                            scheduledAt: new Date(otoForm.scheduledAt),
-                            remarks: otoForm.remarks,
-                          });
-                        }} className="space-y-3 mt-2 text-left">
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Session Title</label>
-                            <Input placeholder="Session Title" value={otoForm.title} onChange={(e) => setOtoForm({ ...otoForm, title: e.target.value })} required />
-                          </div>
-                          {/* SEARCHABLE TEACHER DROPDOWN */}
-                          <div className="space-y-1 relative" ref={teacherDropdownRef}>
-                            <label className="text-xs font-medium text-gray-700">Select Teacher</label>
-                            <Input
-                              placeholder="Search teacher by name or ID..."
-                              value={teacherSearch}
-                              onChange={(e) => {
-                                setTeacherSearch(e.target.value);
-                                setShowTeacherDropdown(true);
-                                setOtoForm(prev => ({ ...prev, teacherId: 0 }));
-                              }}
-                              onFocus={() => setShowTeacherDropdown(true)}
-                              className="w-full bg-white border"
-                            />
-                            {showTeacherDropdown && (
-                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                                {filteredTeachers.length === 0 ? (
-                                  <div className="p-2.5 text-xs text-gray-400">No teachers found</div>
-                                ) : (
-                                  filteredTeachers.map((t) => (
-                                    <div
-                                      key={t.id}
-                                      onClick={() => {
-                                        setOtoForm(prev => ({ ...prev, teacherId: t.id }));
-                                        setTeacherSearch(`${t.name} (${t.unionId || `ID: ${t.id}`})`);
-                                        setShowTeacherDropdown(false);
-                                      }}
-                                      className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
-                                    >
-                                      <div className="font-semibold text-gray-800">{t.name}</div>
-                                      <div className="text-[10px] text-gray-500 font-mono">ID: {t.id} | Union ID: {t.unionId || "-"}</div>
-                                    </div>
-                                  ))
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* SEARCHABLE STUDENT DROPDOWN */}
-                          <div className="space-y-1 relative" ref={studentDropdownRef}>
-                            <label className="text-xs font-medium text-gray-700">Select Student</label>
-                            <Input
-                              placeholder="Search student by name or ID..."
-                              value={studentSearch}
-                              onChange={(e) => {
-                                setStudentSearch(e.target.value);
-                                setShowStudentDropdown(true);
-                                setOtoForm(prev => ({ ...prev, studentId: 0 }));
-                              }}
-                              onFocus={() => setShowStudentDropdown(true)}
-                              className="w-full bg-white border"
-                            />
-                            {showStudentDropdown && (
-                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                                {filteredStudents.length === 0 ? (
-                                  <div className="p-2.5 text-xs text-gray-400">No students found</div>
-                                ) : (
-                                  filteredStudents.map((std) => (
-                                    <div
-                                      key={std.id}
-                                      onClick={() => {
-                                        setOtoForm(prev => ({ ...prev, studentId: std.id }));
-                                        setStudentSearch(`${std.name} (${std.unionId || `ID: ${std.id}`})`);
-                                        setShowStudentDropdown(false);
-                                      }}
-                                      className="p-2.5 text-xs hover:bg-emerald-50 hover:text-emerald-800 cursor-pointer border-b last:border-b-0 text-left"
-                                    >
-                                      <div className="font-semibold text-gray-800">{std.name}</div>
-                                      <div className="text-[10px] text-gray-500 font-mono">ID: {std.id} | Union ID: {std.unionId || "-"}</div>
-                                    </div>
-                                  ))
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
-                            <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Class Start Date & Time</label>
-                            <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Session Notes (optional)</label>
-                            <Input placeholder="Session notes..." value={otoForm.remarks} onChange={(e) => setOtoForm({ ...otoForm, remarks: e.target.value })} />
-                          </div>
-                          <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={editOneToOne.isPending}>
-                            {editOneToOne.isPending ? "Updating..." : "Update Session"}
-                          </Button>
-                        </form>
-                      </DialogContent>
-                    </Dialog>
-
-                    {/* Reschedule Modal */}
-                    <Dialog open={rescheduleOpen} onOpenChange={setRescheduleOpen}>
-                      <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
-                        <DialogHeader><DialogTitle className="text-base font-bold text-gray-800">Reschedule 1-on-1 Session</DialogTitle></DialogHeader>
-                        <form onSubmit={(e) => {
-                          e.preventDefault();
-                          if (!selectedOtoSession) return;
-                          rescheduleOneToOne.mutate({
-                            sessionId: selectedOtoSession.id,
-                            scheduledAt: new Date(otoForm.scheduledAt),
-                            sessionLength: otoForm.sessionLength,
-                          });
-                        }} className="space-y-3 mt-2 text-left">
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">New Start Date & Time</label>
-                            <Input type="datetime-local" value={otoForm.scheduledAt} onChange={(e) => setOtoForm({ ...otoForm, scheduledAt: e.target.value })} required />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Expected Duration (minutes)</label>
-                            <Input type="number" placeholder="Expected Duration (min)" value={otoForm.sessionLength} onChange={(e) => setOtoForm({ ...otoForm, sessionLength: Number(e.target.value) })} required />
-                          </div>
-                          <Button type="submit" className="w-full bg-emerald-600 text-white font-medium" disabled={rescheduleOneToOne.isPending}>
-                            {rescheduleOneToOne.isPending ? "Rescheduling..." : "Reschedule Session"}
-                          </Button>
-                        </form>
-                      </DialogContent>
-                    </Dialog>
-
-                    {/* Teacher Request Reschedule Modal */}
-                    <Dialog open={teacherRescheduleOpen} onOpenChange={setTeacherRescheduleOpen}>
-                      <DialogContent className="max-w-md bg-white rounded-xl shadow-xl border border-gray-100">
-                        <DialogHeader>
-                          <DialogTitle className="text-base font-bold text-gray-800">Request 1-on-1 Reschedule</DialogTitle>
-                        </DialogHeader>
-                        <form onSubmit={(e) => {
-                          e.preventDefault();
-                          if (!selectedOtoSession) return;
-                          requestReschedule.mutate({
-                            sessionId: selectedOtoSession.id,
-                            proposedScheduledAt: new Date(rescheduleForm.proposedScheduledAt),
-                            reason: rescheduleForm.reason,
-                          });
-                        }} className="space-y-3 mt-2 text-left">
-                          <div>
-                            <p className="text-xs text-gray-500 mb-2 font-light">
-                              Proposed reschedule request for <b>"{selectedOtoSession?.title || "1-to-1 Session"}"</b>.
-                              Your request will be submitted to the Super Admin for approval.
-                            </p>
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Proposed New Date & Time *</label>
-                            <Input
-                              type="datetime-local"
-                              value={rescheduleForm.proposedScheduledAt}
-                              onChange={(e) => setRescheduleForm({ ...rescheduleForm, proposedScheduledAt: e.target.value })}
-                              required
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium text-gray-700">Reason for Rescheduling *</label>
-                            <textarea
-                              className="w-full border rounded-lg px-3 py-2 text-sm bg-white border-gray-200 text-gray-850 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all outline-none"
-                              placeholder="Please explain why you need to reschedule this class..."
-                              value={rescheduleForm.reason}
-                              onChange={(e) => setRescheduleForm({ ...rescheduleForm, reason: e.target.value })}
-                              required
-                              rows={3}
-                            />
-                          </div>
-                          <Button type="submit" className="w-full bg-emerald-600 text-white font-medium mt-2" disabled={requestReschedule.isPending}>
-                            {requestReschedule.isPending ? "Submitting Request..." : "Submit Reschedule Request"}
-                          </Button>
-                        </form>
-                      </DialogContent>
-                    </Dialog>
-                  </div>
-                )}
-                <Card className="border border-gray-100">
-                  <CardContent className="p-0 overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Session Details</TableHead>
-                          <TableHead>Teacher</TableHead>
-                          <TableHead>Student</TableHead>
-                          <TableHead>Duration</TableHead>
-                          <TableHead>Scheduled</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Action</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {oneToOneQuery.data?.map((s) => (
-                          <TableRow key={s.id} className="align-top hover:bg-gray-50/50">
-                            <TableCell className="font-semibold text-gray-800 text-sm">
-                              <div>{s.title || "1-to-1 Session"}</div>
-                              {s.status === "completed" && (
-                                <div className="text-[11px] text-gray-500 mt-2 space-y-1 border-t pt-2 max-w-xs leading-relaxed font-normal">
-                                  <div>⏱️ <b>Actual:</b> {s.startedAt ? new Date(s.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-"} - {s.endedAt ? new Date(s.endedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-"}</div>
-                                  <div>⏳ <b>Conducted:</b> {s.actualDuration !== null ? `${s.actualDuration} min` : "-"}</div>
-                                  <div className="flex gap-2.5 mt-1">
-                                    <span>👩‍🏫 Teacher: <Badge variant={s.teacherAttendance === "present" ? "default" : "destructive"} className="text-[9px] px-1 py-0 font-normal uppercase">{s.teacherAttendance || "absent"}</Badge></span>
-                                    <span>🎓 Student: <Badge variant={s.studentAttendance === "present" ? "default" : "destructive"} className="text-[9px] px-1 py-0 font-normal uppercase">{s.studentAttendance || "absent"}</Badge></span>
-                                  </div>
-                                  {s.remarks && <div className="text-gray-400 italic text-[10px] mt-1 font-serif">"{s.remarks}"</div>}
-                                </div>
-                              )}
-                              {s.status !== "completed" && s.remarks && (
-                                <div className="text-[11px] text-gray-400 font-light mt-1 max-w-xs truncate">Note: "{s.remarks}"</div>
-                              )}
-                            </TableCell>
-                            <TableCell className="text-sm">{s.teacher?.name || "-"}</TableCell>
-                            <TableCell className="text-sm">{s.student?.name || "-"}</TableCell>
-                            <TableCell className="text-sm">{s.sessionLength} min</TableCell>
-                            <TableCell className="text-sm">{s.scheduledAt ? new Date(s.scheduledAt).toLocaleString() : "-"}</TableCell>
-                            <TableCell className="text-sm">
-                              <div className="flex flex-col gap-1">
-                                {s.status === "ongoing" ? (
-                                  <Badge className="bg-red-500 text-white animate-pulse w-fit">🔴 Live</Badge>
-                                ) : s.status === "reschedule_request_pending" ? (
-                                  <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px] w-fit font-medium">
-                                    Reschedule Request Pending
-                                  </Badge>
-                                ) : (
-                                  <Badge variant={s.status === "completed" ? "default" : s.status === "rescheduled" ? "secondary" : "outline"} className="w-fit">
-                                    {s.status}
-                                  </Badge>
-                                )}
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                {/* JOIN BUTTON FOR STUDENT */}
-                                {user?.role === "student" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (
-                                  <Button
-                                    size="sm"
-                                    variant="secondary"
-                                    disabled
-                                    className="bg-gray-100 text-gray-400 cursor-not-allowed text-xs"
-                                  >
-                                    Waiting for Teacher
-                                  </Button>
-                                )}
-                                {user?.role === "student" && s.status === "ongoing" && (
-                                  <Button
-                                    size="sm"
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
-                                    onClick={() => handleJoinOneToOne(s)}
-                                    disabled={joinOneToOne.isPending}
-                                  >
-                                    <Video className="w-3.5 h-3.5 mr-1" /> Join Class
-                                  </Button>
-                                )}
-
-                                {/* TEACHER ACTIONS */}
-                                {user?.role === "teacher" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (() => {
-                                  const pendingRequest = s.rescheduleRequests?.find((r: any) => r.status === "pending");
-                                  const isUpcoming = new Date() < new Date(s.scheduledAt);
-                                  const isReschedulePending = s.status === "reschedule_request_pending" || !!pendingRequest;
-                                  return (
-                                    <>
-                                      <Button
-                                        size="sm"
-                                        className="bg-green-600 hover:bg-green-700 text-white text-xs"
-                                        onClick={() => handleStartOneToOne(s)}
-                                        disabled={startOneToOne.isPending}
-                                      >
-                                        <Play className="w-3.5 h-3.5 mr-1" /> Start
-                                      </Button>
-                                      {isUpcoming && (
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          className="text-xs border-gray-200"
-                                          onClick={() => handleOpenTeacherReschedule(s)}
-                                          disabled={isReschedulePending}
-                                        >
-                                          <Calendar className="w-3.5 h-3.5 mr-1 text-gray-500" />
-                                          {isReschedulePending ? "Reschedule Pending" : "Request Reschedule"}
-                                        </Button>
-                                      )}
-                                    </>
-                                  );
-                                })()}
-                                {user?.role === "teacher" && s.status === "ongoing" && (
-                                  <>
-                                    <Button
-                                      size="sm"
-                                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
-                                      onClick={() => handleJoinOneToOne(s)}
-                                      disabled={joinOneToOne.isPending}
-                                    >
-                                      <Video className="w-3.5 h-3.5 mr-1" /> Join
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="destructive"
-                                      className="text-xs"
-                                      onClick={() => endOneToOne.mutate({ sessionId: s.id })}
-                                      disabled={endOneToOne.isPending}
-                                    >
-                                      <Square className="w-3.5 h-3.5 mr-1" /> End
-                                    </Button>
-                                  </>
-                                )}
-
-                                {/* SUPER ADMIN ACTIONS */}
-                                {isSuperAdmin && (
-                                  <>
-                                    {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending" || s.status === "ongoing") && (
-                                      <Button
-                                        size="sm"
-                                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
-                                        onClick={() => handleJoinOneToOne(s)}
-                                        disabled={joinOneToOne.isPending}
-                                      >
-                                        <Video className="w-3.5 h-3.5 mr-1" /> Join
-                                      </Button>
-                                    )}
-                                    {s.status === "ongoing" && (
-                                      <Button
-                                        size="sm"
-                                        variant="destructive"
-                                        className="text-xs"
-                                        onClick={() => endOneToOne.mutate({ sessionId: s.id })}
-                                        disabled={endOneToOne.isPending}
-                                      >
-                                        <Square className="w-3.5 h-3.5 mr-1" /> End
-                                      </Button>
-                                    )}
-                                    {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (
-                                      <>
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          className="text-xs border-gray-200"
-                                          onClick={() => handleOpenEditOto(s)}
-                                        >
-                                          <Edit3 className="w-3.5 h-3.5 mr-1 text-gray-500" /> Edit
-                                        </Button>
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          className="text-xs border-gray-200"
-                                          onClick={() => handleOpenRescheduleOto(s)}
-                                        >
-                                          <Calendar className="w-3.5 h-3.5 mr-1 text-gray-500" /> Reschedule
-                                        </Button>
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-100 text-xs"
-                                          onClick={() => cancelOneToOne.mutate({ sessionId: s.id })}
-                                          disabled={cancelOneToOne.isPending}
-                                        >
-                                          <XCircle className="w-3.5 h-3.5 mr-1" /> Cancel
-                                        </Button>
-                                      </>
-                                    )}
-                                  </>
-                                )}
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                        {(!oneToOneQuery.data || oneToOneQuery.data.length === 0) && (
-                          <TableRow>
-                            <TableCell colSpan={7} className="text-center text-gray-400 py-10 text-xs">
-                              No 1-to-1 sessions found.
-                            </TableCell>
-                          </TableRow>
-                        )}
-                      </TableBody>
-                    </Table>
-                  </CardContent>
-                </Card>
-              </div>
-            </TabsContent>
-          )}
-        </Tabs>
+                    </div>
+                  )}
+                  {renderOneToOneList()}
+                </div>
+              </TabsContent>
+            )}
+          </Tabs>
+        )}
       </div>
     </>
   );

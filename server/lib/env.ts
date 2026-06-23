@@ -15,7 +15,7 @@ export const env = {
   databaseUrl: required("DATABASE_URL"),
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || "rzp_test_mockkeyid12345",
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "mockkeysecret67890",
-  studentIdPrefix: process.env.STUDENT_ID_PREFIX || "STU",
+  studentIdPrefix: process.env.STUDENT_ID_PREFIX || "S",
 };
 
 export const jwtSecret = new TextEncoder().encode(

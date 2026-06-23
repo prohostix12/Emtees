@@ -27,6 +27,943 @@ import {
 import { sendNotification } from "../lib/notificationEngine";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
 
+export function getDurationCategory(duration: number): 30 | 45 | 60 | null {
+  if (duration >= 50 && duration <= 70) return 60;
+  if (duration >= 35 && duration <= 55) return 45;
+  if (duration >= 20 && duration <= 40) return 30;
+  return null;
+}
+
+export async function fetchFullStudentReportData(db: ReturnType<typeof getDb>, userId: number) {
+  const studentUser = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+  });
+  if (!studentUser) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Student user record not found" });
+  }
+
+  const studentProfile = await db.query.profiles.findFirst({
+    where: eq(profiles.userId, userId),
+  });
+
+  // Fetch all enrollments
+  const enrollments = await db
+    .select({
+      id: batchEnrollments.id,
+      batchId: batchEnrollments.batchId,
+      joinedAt: batchEnrollments.joinedAt,
+      leftAt: batchEnrollments.leftAt,
+      status: batchEnrollments.status,
+      paymentType: batchEnrollments.paymentType,
+      assignedTeachers: batchEnrollments.assignedTeachers,
+      batchName: batches.name,
+      batchStartDate: batches.startDate,
+      batchDuration: batches.duration,
+      batchCourseFee: batches.courseFee,
+      moduleName: modules.name,
+      teacherId: batches.teacherId,
+    })
+    .from(batchEnrollments)
+    .innerJoin(batches, eq(batchEnrollments.batchId, batches.id))
+    .innerJoin(modules, eq(batches.moduleId, modules.id))
+    .where(eq(batchEnrollments.studentId, userId));
+
+  // Get all unique teacher IDs from enrollments
+  const teacherIds = new Set<number>();
+  enrollments.forEach((e) => {
+    if (e.teacherId) teacherIds.add(e.teacherId);
+    if (e.assignedTeachers && Array.isArray(e.assignedTeachers)) {
+      e.assignedTeachers.forEach((tId: any) => {
+        const parsedId = Number(tId);
+        if (!isNaN(parsedId)) teacherIds.add(parsedId);
+      });
+    }
+  });
+
+  let teachersList: { id: number; name: string }[] = [];
+  if (teacherIds.size > 0) {
+    teachersList = await db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(inArray(users.id, Array.from(teacherIds)));
+  }
+  const teachersMap = new Map(teachersList.map((t) => [t.id, t.name]));
+
+  const enrollmentsWithTeachers = enrollments.map((e) => {
+    const primaryTeacherName = e.teacherId ? teachersMap.get(e.teacherId) || "Unknown" : "None";
+    const assignedTeachersNames = Array.isArray(e.assignedTeachers)
+      ? e.assignedTeachers.map((tId: any) => ({
+          id: Number(tId),
+          name: teachersMap.get(Number(tId)) || "Unknown",
+        }))
+      : [];
+
+    return {
+      ...e,
+      primaryTeacherName,
+      assignedTeachersNames,
+    };
+  });
+
+  // Teacher & Class Summary
+  const groupClasses = await db
+    .select({
+      teacherId: classes.teacherId,
+      teacherName: users.name,
+      count: sql<number>`count(*)`
+    })
+    .from(attendance)
+    .innerJoin(classes, eq(attendance.classId, classes.id))
+    .innerJoin(users, eq(classes.teacherId, users.id))
+    .where(and(
+      eq(attendance.studentId, userId),
+      eq(classes.status, "completed")
+    ))
+    .groupBy(classes.teacherId, users.name);
+
+  const oneToOnes = await db
+    .select({
+      teacherId: oneToOneSessions.teacherId,
+      teacherName: users.name,
+      count: sql<number>`count(*)`
+    })
+    .from(oneToOneSessions)
+    .innerJoin(users, eq(oneToOneSessions.teacherId, users.id))
+    .where(and(
+      eq(oneToOneSessions.studentId, userId),
+      eq(oneToOneSessions.status, "completed")
+    ))
+    .groupBy(oneToOneSessions.teacherId, users.name);
+
+  const teachersSummaryMap = new Map<number, { teacherId: number; teacherName: string; groupCount: number; oneToOneCount: number }>();
+  
+  groupClasses.forEach((gc) => {
+    teachersSummaryMap.set(gc.teacherId, {
+      teacherId: gc.teacherId,
+      teacherName: gc.teacherName,
+      groupCount: Number(gc.count),
+      oneToOneCount: 0,
+    });
+  });
+
+  oneToOnes.forEach((oto) => {
+    const existing = teachersSummaryMap.get(oto.teacherId);
+    if (existing) {
+      existing.oneToOneCount = Number(oto.count);
+    } else {
+      teachersSummaryMap.set(oto.teacherId, {
+        teacherId: oto.teacherId,
+        teacherName: oto.teacherName,
+        groupCount: 0,
+        oneToOneCount: Number(oto.count),
+      });
+    }
+  });
+
+  const teachersSummary = Array.from(teachersSummaryMap.values()).map((t) => ({
+    ...t,
+    totalCount: t.groupCount + t.oneToOneCount,
+  }));
+
+  // Payments & Financials
+  const paymentsList = await db.query.payments.findMany({
+    where: eq(payments.studentId, userId),
+    orderBy: desc(payments.createdAt),
+  });
+
+  const lastPayment = paymentsList.find((p) => p.status === "paid");
+  const lastPaymentDate = lastPayment?.paidDate || lastPayment?.paidAt || null;
+
+  // Attendance
+  const attendanceRecords = await db.query.attendance.findMany({
+    where: eq(attendance.studentId, userId),
+  });
+
+  const totalClassesConducted = attendanceRecords.length;
+  const classesAttended = attendanceRecords.filter((a) => a.status === "present" || a.status === "late").length;
+  const classesMissed = attendanceRecords.filter((a) => a.status === "absent").length;
+  const attendancePercentage = totalClassesConducted > 0 ? Math.round((classesAttended / totalClassesConducted) * 100) : 0;
+
+  // Session Tracking (30, 45, 60 minutes)
+  const pkg = (studentProfile?.packageConfig as any) || {
+    oneToOne: { total: 0, min30: 0, min45: 0, min60: 0 },
+    group: { total: 0, min30: 0, min45: 0, min60: 0 },
+  };
+
+  const oneToOneAllocated30 = Number(pkg.oneToOne?.min30 || 0);
+  const oneToOneAllocated45 = Number(pkg.oneToOne?.min45 || 0);
+  const oneToOneAllocated60 = Number(pkg.oneToOne?.min60 || 0);
+
+  const completedOneToOnes = await db.query.oneToOneSessions.findMany({
+    where: and(
+      eq(oneToOneSessions.studentId, userId),
+      eq(oneToOneSessions.status, "completed")
+    ),
+  });
+
+  const oToOneAttended30 = completedOneToOnes.filter((s) => s.sessionLength === 30).length;
+  const oToOneAttended45 = completedOneToOnes.filter((s) => s.sessionLength === 45).length;
+  const oToOneAttended60 = completedOneToOnes.filter((s) => s.sessionLength === 60).length;
+
+  const oneToOneTracking = {
+    min30: {
+      allocated: oneToOneAllocated30,
+      attended: oToOneAttended30,
+      remaining: Math.max(0, oneToOneAllocated30 - oToOneAttended30),
+    },
+    min45: {
+      allocated: oneToOneAllocated45,
+      attended: oToOneAttended45,
+      remaining: Math.max(0, oneToOneAllocated45 - oToOneAttended45),
+    },
+    min60: {
+      allocated: oneToOneAllocated60,
+      attended: oToOneAttended60,
+      remaining: Math.max(0, oneToOneAllocated60 - oToOneAttended60),
+    },
+  };
+
+  const groupAllocated30 = Number(pkg.group?.min30 || 0);
+  const groupAllocated45 = Number(pkg.group?.min45 || 0);
+  const groupAllocated60 = Number(pkg.group?.min60 || 0);
+
+  const completedGroupClassesAttended = await db
+    .select({
+      duration: classes.duration,
+    })
+    .from(attendance)
+    .innerJoin(classes, eq(attendance.classId, classes.id))
+    .where(and(
+      eq(attendance.studentId, userId),
+      or(eq(attendance.status, "present"), eq(attendance.status, "late")),
+      eq(classes.classType, "group"),
+      eq(classes.status, "completed")
+    ));
+
+  const groupAttended30 = completedGroupClassesAttended.filter((c) => c.duration === 30).length;
+  const groupAttended45 = completedGroupClassesAttended.filter((c) => c.duration === 45).length;
+  const groupAttended60 = completedGroupClassesAttended.filter((c) => c.duration === 60).length;
+
+  const groupTracking = {
+    min30: {
+      allocated: groupAllocated30,
+      attended: groupAttended30,
+      remaining: Math.max(0, groupAllocated30 - groupAttended30),
+    },
+    min45: {
+      allocated: groupAllocated45,
+      attended: groupAttended45,
+      remaining: Math.max(0, groupAllocated45 - groupAttended45),
+    },
+    min60: {
+      allocated: groupAllocated60,
+      attended: groupAttended60,
+      remaining: Math.max(0, groupAllocated60 - groupAttended60),
+    },
+  };
+
+  // Session Utilization Dashboard
+  const totalOneToOneAllocated = oneToOneAllocated30 + oneToOneAllocated45 + oneToOneAllocated60;
+  const totalOneToOneAttended = oToOneAttended30 + oToOneAttended45 + oToOneAttended60;
+  const totalOneToOneRemaining = Math.max(0, totalOneToOneAllocated - totalOneToOneAttended);
+
+  const totalGroupAllocated = groupAllocated30 + groupAllocated45 + groupAllocated60;
+  const totalGroupAttended = groupAttended30 + groupAttended45 + groupAttended60;
+  const totalGroupRemaining = Math.max(0, totalGroupAllocated - totalGroupAttended);
+
+  const sessionUtilization = {
+    oneToOne: {
+      allocated: totalOneToOneAllocated,
+      attended: totalOneToOneAttended,
+      remaining: totalOneToOneRemaining,
+      percentageUsed: totalOneToOneAllocated > 0 ? Math.round((totalOneToOneAttended / totalOneToOneAllocated) * 100) : 0,
+    },
+    group: {
+      allocated: totalGroupAllocated,
+      attended: totalGroupAttended,
+      remaining: totalGroupRemaining,
+      percentageUsed: totalGroupAllocated > 0 ? Math.round((totalGroupAttended / totalGroupAllocated) * 100) : 0,
+    },
+  };
+
+  // Recent Attendance History
+  const recentAttendance = await db
+    .select({
+      id: attendance.id,
+      recordedAt: attendance.recordedAt,
+      status: attendance.status,
+      classTitle: classes.title,
+      classType: classes.classType,
+      duration: classes.duration,
+      teacherName: users.name,
+      scheduledAt: classes.scheduledAt,
+    })
+    .from(attendance)
+    .innerJoin(classes, eq(attendance.classId, classes.id))
+    .innerJoin(users, eq(classes.teacherId, users.id))
+    .where(eq(attendance.studentId, userId))
+    .orderBy(desc(classes.scheduledAt))
+    .limit(20);
+
+  return {
+    student: {
+      id: studentUser.id,
+      name: studentUser.name,
+      unionId: studentUser.unionId,
+      email: studentUser.email,
+      phone: studentUser.phone,
+      status: studentUser.status,
+      createdAt: studentUser.createdAt,
+    },
+    profile: studentProfile,
+    enrollments: enrollmentsWithTeachers,
+    teachersSummary,
+    payments: paymentsList,
+    lastPaymentDate,
+    attendance: {
+      total: totalClassesConducted,
+      present: classesAttended,
+      missed: classesMissed,
+      percentage: attendancePercentage,
+    },
+    oneToOneTracking,
+    groupTracking,
+    sessionUtilization,
+recentAttendance,
+    paymentType: enrollments[0]?.paymentType || "FULL_PAYMENT",
+  };
+}
+
+export async function calculateIncentiveForTeacherMonth(
+  db: ReturnType<typeof getDb>,
+  teacherId: number,
+  month: string
+): Promise<number> {
+  // 1. Fetch completed classes and sessions in this month
+  const groupClassesList = await db.query.classes.findMany({
+    where: and(
+      eq(classes.teacherId, teacherId),
+      eq(classes.status, "completed"),
+      eq(classes.classType, "group"),
+      sql`TO_CHAR(${classes.scheduledAt}, 'YYYY-MM') = ${month}`
+    ),
+  });
+
+  const oneToOneSessionsList = await db.query.oneToOneSessions.findMany({
+    where: and(
+      eq(oneToOneSessions.teacherId, teacherId),
+      eq(oneToOneSessions.status, "completed"),
+      sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${month}`
+    ),
+  });
+
+  const totalClassesConducted = groupClassesList.length + oneToOneSessionsList.length;
+  if (totalClassesConducted === 0) return 0;
+
+  // 2. Teacher attendance
+  // Working days (unique days with completed or scheduled classes in this month)
+  const scheduledGroupDays = await db.select({
+    day: sql`TO_CHAR(${classes.scheduledAt}, 'YYYY-MM-DD')`
+  })
+  .from(classes)
+  .where(and(
+    eq(classes.teacherId, teacherId),
+    eq(classes.status, "completed"),
+    sql`TO_CHAR(${classes.scheduledAt}, 'YYYY-MM') = ${month}`
+  ));
+
+  const scheduledOtoDays = await db.select({
+    day: sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM-DD')`
+  })
+  .from(oneToOneSessions)
+  .where(and(
+    eq(oneToOneSessions.teacherId, teacherId),
+    eq(oneToOneSessions.status, "completed"),
+    sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${month}`
+  ));
+
+  const uniqueDays = new Set<string>();
+  scheduledGroupDays.forEach(d => { if (d.day) uniqueDays.add(d.day as string); });
+  scheduledOtoDays.forEach(d => { if (d.day) uniqueDays.add(d.day as string); });
+  const workingDays = uniqueDays.size;
+
+  const absentOtoDays = await db.select({
+    day: sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM-DD')`
+  })
+  .from(oneToOneSessions)
+  .where(and(
+    eq(oneToOneSessions.teacherId, teacherId),
+    eq(oneToOneSessions.teacherAttendance, "absent"),
+    sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${month}`
+  ));
+  const absentDays = new Set(absentOtoDays.map(d => d.day as string)).size;
+  const presentDays = Math.max(0, workingDays - absentDays);
+
+  const teacherAttendancePct = workingDays > 0 ? (presentDays / workingDays) * 100 : 100;
+
+  // 3. Average Student Attendance
+  let totalStudentCount = 0;
+  let presentStudentCount = 0;
+  for (const cls of groupClassesList) {
+    const attendanceRecords = await db.query.attendance.findMany({
+      where: eq(attendance.classId, cls.id),
+    });
+    totalStudentCount += attendanceRecords.length;
+    presentStudentCount += attendanceRecords.filter((r) => r.status === "present" || r.status === "late").length;
+  }
+  const studentAttendancePct = totalStudentCount > 0 ? (presentStudentCount / totalStudentCount) * 100 : 100;
+
+  // 4. Student Feedback Rating
+  const feedbackRecords = await db.query.feedback.findMany({
+    where: and(
+      eq(feedback.teacherId, teacherId),
+      sql`TO_CHAR(${feedback.createdAt}, 'YYYY-MM') = ${month}`
+    ),
+  });
+  const avgFeedbackRating = feedbackRecords.length > 0
+    ? feedbackRecords.reduce((sum, f) => sum + f.rating, 0) / feedbackRecords.length
+    : 5.0; // Default to 5 if no feedback
+
+  // 5. Composite Score
+  const score = (teacherAttendancePct * 0.4) + (studentAttendancePct * 0.3) + ((avgFeedbackRating / 5) * 100 * 0.3);
+
+  // 6. Incentives
+  return score >= 90 ? 2000 : score >= 80 ? 1000 : 0;
+}
+
+export async function recalculateSalaryInternal(
+  db: ReturnType<typeof getDb>,
+  teacherId: number,
+  month: string,
+  forceInsert: boolean = false
+) {
+  // 1. Fetch completed group classes for this teacher in the month
+  const groupClassesList = await db.select({
+    duration: classes.duration
+  })
+  .from(classes)
+  .where(and(
+    eq(classes.teacherId, teacherId),
+    eq(classes.status, "completed"),
+    eq(classes.classType, "group"),
+    sql`TO_CHAR(${classes.scheduledAt}, 'YYYY-MM') = ${month}`
+  ));
+
+  // 2. Fetch completed 1-to-1 sessions for this teacher in the month
+  const oneToOneSessionsList = await db.select({
+    sessionLength: oneToOneSessions.sessionLength
+  })
+  .from(oneToOneSessions)
+  .where(and(
+    eq(oneToOneSessions.teacherId, teacherId),
+    eq(oneToOneSessions.status, "completed"),
+    sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${month}`
+  ));
+
+  // 3. Count categories
+  let group30Count = 0;
+  let group45Count = 0;
+  let group60Count = 0;
+  for (const cls of groupClassesList) {
+    const cat = getDurationCategory(cls.duration || 0);
+    if (cat === 30) group30Count++;
+    else if (cat === 45) group45Count++;
+    else if (cat === 60) group60Count++;
+  }
+
+  let oneToOne30Count = 0;
+  let oneToOne45Count = 0;
+  let oneToOne60Count = 0;
+  for (const sess of oneToOneSessionsList) {
+    const cat = getDurationCategory(sess.sessionLength || 0);
+    if (cat === 30) oneToOne30Count++;
+    else if (cat === 45) oneToOne45Count++;
+    else if (cat === 60) oneToOne60Count++;
+  }
+
+  // 4. Fetch salary configuration
+  const config = await db.query.teacherSalaryConfigs.findFirst({
+    where: eq(teacherSalaryConfigs.teacherId, teacherId),
+  });
+
+  const basicSalary = config ? parseFloat(config.basicSalary) : 0;
+  const group30MinRate = config ? parseFloat(config.group30MinRate) : 0;
+  const group45MinRate = config ? parseFloat(config.group45MinRate) : 0;
+  const group60MinRate = config ? parseFloat(config.group60MinRate) : 0;
+  const oneToOne30MinRate = config ? parseFloat(config.oneToOne30MinRate) : 0;
+  const oneToOne45MinRate = config ? parseFloat(config.oneToOne45MinRate) : 0;
+  const oneToOne60MinRate = config ? parseFloat(config.oneToOne60MinRate) : 0;
+  const bonusAmount = config ? parseFloat(config.bonusAmount) : 0;
+  const deductionAmount = config ? parseFloat(config.deductionAmount) : 0;
+
+  // 5. Calculate Total Earnings & Net Salary
+  const sessionEarnings =
+    (group30Count * group30MinRate) +
+    (group45Count * group45MinRate) +
+    (group60Count * group60MinRate) +
+    (oneToOne30Count * oneToOne30MinRate) +
+    (oneToOne45Count * oneToOne45MinRate) +
+    (oneToOne60Count * oneToOne60MinRate);
+
+  const dynamicIncentive = await calculateIncentiveForTeacherMonth(db, teacherId, month);
+  const netSalary = basicSalary + sessionEarnings + dynamicIncentive + bonusAmount - deductionAmount;
+
+  // 6. Find if there is an existing record
+  const existing = await db.query.teacherSalaries.findFirst({
+    where: and(
+      eq(teacherSalaries.teacherId, teacherId),
+      eq(teacherSalaries.month, month)
+    )
+  });
+
+  const salaryValues = {
+    teacherId,
+    month,
+    basicSalary: String(basicSalary),
+    groupClassesCount: group30Count + group45Count + group60Count,
+    oneToOneCount: oneToOne30Count + oneToOne45Count + oneToOne60Count,
+    group30MinCount: group30Count,
+    group45MinCount: group45Count,
+    group60MinCount: group60Count,
+    oneToOne30MinCount: oneToOne30Count,
+    oneToOne45MinCount: oneToOne45Count,
+    oneToOne60MinCount: oneToOne60Count,
+    group30MinRate: String(group30MinRate),
+    group45MinRate: String(group45MinRate),
+    group60MinRate: String(group60MinRate),
+    oneToOne30MinRate: String(oneToOne30MinRate),
+    oneToOne45MinRate: String(oneToOne45MinRate),
+    oneToOne60MinRate: String(oneToOne60MinRate),
+    bonusAmount: String(bonusAmount),
+    deductionAmount: String(deductionAmount),
+    incentiveAmount: String(dynamicIncentive),
+    netSalary: String(netSalary),
+    totalAmount: String(netSalary), // totalAmount matches netSalary for UI compatibility
+  };
+
+  if (existing) {
+    await db.update(teacherSalaries)
+      .set(salaryValues)
+      .where(eq(teacherSalaries.id, existing.id));
+    return db.query.teacherSalaries.findFirst({ where: eq(teacherSalaries.id, existing.id) });
+  }
+  return null;
+}
+
+export async function fetchFullTeacherReportData(db: ReturnType<typeof getDb>, userId: number) {
+  const teacherUser = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+  });
+  if (!teacherUser) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Teacher not found" });
+  }
+
+  const teacherProfile = await db.query.profiles.findFirst({
+    where: eq(profiles.userId, userId),
+  });
+
+  // 1. Batches & Modules
+  const teacherBatches = await db.query.batches.findMany({
+    where: eq(batches.teacherId, userId),
+    with: { module: true },
+  });
+
+  const batchesDetails = [];
+  const modulesMap = new Map<number, any>();
+
+  for (const batch of teacherBatches) {
+    const enrollments = await db.query.batchEnrollments.findMany({
+      where: and(
+        eq(batchEnrollments.batchId, batch.id),
+        eq(batchEnrollments.status, "active")
+      ),
+    });
+
+    batchesDetails.push({
+      id: batch.id,
+      name: batch.name,
+      code: `B${String(batch.id).padStart(3, "0")}`,
+      courseName: batch.module?.name || "N/A",
+      moduleName: batch.module?.name || "N/A",
+      studentsCount: enrollments.length,
+      startDate: batch.startDate,
+      duration: batch.duration || "N/A",
+      status: batch.status || "active",
+    });
+
+    if (batch.module) {
+      if (!modulesMap.has(batch.module.id)) {
+        modulesMap.set(batch.module.id, {
+          id: batch.module.id,
+          name: batch.module.name,
+          duration: batch.module.duration || "N/A",
+          totalClassesPlanned: 0,
+          completedClasses: 0,
+          remainingClasses: 0,
+          batchIds: [],
+        });
+      }
+      modulesMap.get(batch.module.id).batchIds.push(batch.id);
+    }
+  }
+
+  const modulesDetails = Array.from(modulesMap.values());
+  for (const mod of modulesDetails) {
+    if (mod.batchIds.length > 0) {
+      const compClasses = await db.select({ count: sql`count(*)` }).from(classes).where(and(
+        inArray(classes.batchId, mod.batchIds),
+        eq(classes.status, "completed")
+      ));
+      const remClasses = await db.select({ count: sql`count(*)` }).from(classes).where(and(
+        inArray(classes.batchId, mod.batchIds),
+        or(eq(classes.status, "scheduled"), eq(classes.status, "ongoing"))
+      ));
+
+      const completed = Number(compClasses[0]?.count || 0);
+      const remaining = Number(remClasses[0]?.count || 0);
+
+      mod.completedClasses = completed;
+      mod.remainingClasses = remaining;
+      mod.totalClassesPlanned = completed + remaining;
+    }
+  }
+
+  // 2. Classes Conducted breakdown (30/45/60 min sessions for One-to-One and Group)
+  const otoClasses = await db.query.oneToOneSessions.findMany({
+    where: eq(oneToOneSessions.teacherId, userId),
+  });
+
+  const groupClasses = await db.query.classes.findMany({
+    where: and(
+      eq(classes.teacherId, userId),
+      eq(classes.classType, "group")
+    ),
+  });
+
+  const otoStats = {
+    min30: { total: 0, completed: 0, remaining: 0 },
+    min45: { total: 0, completed: 0, remaining: 0 },
+    min60: { total: 0, completed: 0, remaining: 0 },
+  };
+
+  for (const session of otoClasses) {
+    const len = session.sessionLength || 30;
+    const cat = getDurationCategory(len);
+    const completed = session.status === "completed";
+    const cancelled = session.status === "cancelled";
+    const remaining = !completed && !cancelled;
+
+    if (!cancelled) {
+      if (cat === 30) {
+        otoStats.min30.total++;
+        if (completed) otoStats.min30.completed++;
+        if (remaining) otoStats.min30.remaining++;
+      } else if (cat === 45) {
+        otoStats.min45.total++;
+        if (completed) otoStats.min45.completed++;
+        if (remaining) otoStats.min45.remaining++;
+      } else if (cat === 60) {
+        otoStats.min60.total++;
+        if (completed) otoStats.min60.completed++;
+        if (remaining) otoStats.min60.remaining++;
+      }
+    }
+  }
+
+  const groupStats = {
+    min30: { total: 0, completed: 0, remaining: 0 },
+    min45: { total: 0, completed: 0, remaining: 0 },
+    min60: { total: 0, completed: 0, remaining: 0 },
+  };
+
+  for (const cls of groupClasses) {
+    const len = cls.duration || 30;
+    const cat = getDurationCategory(len);
+    const completed = cls.status === "completed";
+    const cancelled = cls.status === "cancelled";
+    const remaining = !completed && !cancelled;
+
+    if (!cancelled) {
+      if (cat === 30) {
+        groupStats.min30.total++;
+        if (completed) groupStats.min30.completed++;
+        if (remaining) groupStats.min30.remaining++;
+      } else if (cat === 45) {
+        groupStats.min45.total++;
+        if (completed) groupStats.min45.completed++;
+        if (remaining) groupStats.min45.remaining++;
+      } else if (cat === 60) {
+        groupStats.min60.total++;
+        if (completed) groupStats.min60.completed++;
+        if (remaining) groupStats.min60.remaining++;
+      }
+    }
+  }
+
+  const otoTotalAssigned = otoStats.min30.total + otoStats.min45.total + otoStats.min60.total;
+  const otoTotalCompleted = otoStats.min30.completed + otoStats.min45.completed + otoStats.min60.completed;
+  const otoTotalRemaining = otoStats.min30.remaining + otoStats.min45.remaining + otoStats.min60.remaining;
+
+  const groupTotalAssigned = groupStats.min30.total + groupStats.min45.total + groupStats.min60.total;
+  const groupTotalCompleted = groupStats.min30.completed + groupStats.min45.completed + groupStats.min60.completed;
+  const groupTotalRemaining = groupStats.min30.remaining + groupStats.min45.remaining + groupStats.min60.remaining;
+
+  const totalClassesAssigned = otoTotalAssigned + groupTotalAssigned;
+  const totalClassesConducted = otoTotalCompleted + groupTotalCompleted;
+  const totalClassesRemaining = otoTotalRemaining + groupTotalRemaining;
+
+  let totalMinutes = 0;
+  for (const session of otoClasses) {
+    if (session.status === "completed") totalMinutes += session.sessionLength || 30;
+  }
+  for (const cls of groupClasses) {
+    if (cls.status === "completed") totalMinutes += cls.duration || 30;
+  }
+  const totalTeachingHours = Math.round((totalMinutes / 60) * 10) / 10;
+
+  // 3. Attendance Report
+  const activeDays = new Set<string>();
+  for (const session of otoClasses) {
+    if (session.status !== "cancelled") {
+      activeDays.add(new Date(session.scheduledAt).toISOString().split("T")[0]);
+    }
+  }
+  for (const cls of groupClasses) {
+    if (cls.status !== "cancelled") {
+      activeDays.add(new Date(cls.scheduledAt).toISOString().split("T")[0]);
+    }
+  }
+  const workingDays = activeDays.size;
+
+  const absentDaysSet = new Set<string>();
+  for (const session of otoClasses) {
+    if (session.teacherAttendance === "absent") {
+      absentDaysSet.add(new Date(session.scheduledAt).toISOString().split("T")[0]);
+    }
+  }
+  const absentDays = absentDaysSet.size;
+  const presentDays = Math.max(0, workingDays - absentDays);
+  const leaveDays = teacherUser.status === "on_hold" ? 5 : 0;
+  const teacherAttendancePercentage = workingDays > 0 ? Math.round((presentDays / workingDays) * 100) : 100;
+
+  // 4. Salary Configurations & Reports
+  const salaryConfig = await db.query.teacherSalaryConfigs.findFirst({
+    where: eq(teacherSalaryConfigs.teacherId, userId),
+  });
+
+  const salaryHistoryList = await db.query.teacherSalaries.findMany({
+    where: eq(teacherSalaries.teacherId, userId),
+    orderBy: desc(teacherSalaries.month),
+  });
+
+  const basicSalary = salaryConfig ? parseFloat(salaryConfig.basicSalary) : 0;
+  const configGroup30Rate = salaryConfig ? parseFloat(salaryConfig.group30MinRate) : 0;
+  const configGroup45Rate = salaryConfig ? parseFloat(salaryConfig.group45MinRate) : 0;
+  const configGroup60Rate = salaryConfig ? parseFloat(salaryConfig.group60MinRate) : 0;
+  const configOto30Rate = salaryConfig ? parseFloat(salaryConfig.oneToOne30MinRate) : 0;
+  const configOto45Rate = salaryConfig ? parseFloat(salaryConfig.oneToOne45MinRate) : 0;
+  const configOto60Rate = salaryConfig ? parseFloat(salaryConfig.oneToOne60MinRate) : 0;
+  const configBonus = salaryConfig ? parseFloat(salaryConfig.bonusAmount) : 0;
+  const configDeduction = salaryConfig ? parseFloat(salaryConfig.deductionAmount) : 0;
+
+  const currentMonthStr = new Date().toISOString().slice(0, 7);
+  
+  let group30CurrentMonth = 0;
+  let group45CurrentMonth = 0;
+  let group60CurrentMonth = 0;
+  for (const cls of groupClasses) {
+    if (cls.status === "completed" && new Date(cls.scheduledAt).toISOString().slice(0, 7) === currentMonthStr) {
+      const cat = getDurationCategory(cls.duration || 0);
+      if (cat === 30) group30CurrentMonth++;
+      else if (cat === 45) group45CurrentMonth++;
+      else if (cat === 60) group60CurrentMonth++;
+    }
+  }
+
+  let oto30CurrentMonth = 0;
+  let oto45CurrentMonth = 0;
+  let oto60CurrentMonth = 0;
+  for (const session of otoClasses) {
+    if (session.status === "completed" && new Date(session.scheduledAt).toISOString().slice(0, 7) === currentMonthStr) {
+      const cat = getDurationCategory(session.sessionLength || 0);
+      if (cat === 30) oto30CurrentMonth++;
+      else if (cat === 45) oto45CurrentMonth++;
+      else if (cat === 60) oto60CurrentMonth++;
+    }
+  }
+
+  const otoEarnings = (oto30CurrentMonth * configOto30Rate) + (oto45CurrentMonth * configOto45Rate) + (oto60CurrentMonth * configOto60Rate);
+  const groupEarnings = (group30CurrentMonth * configGroup30Rate) + (group45CurrentMonth * configGroup45Rate) + (group60CurrentMonth * configGroup60Rate);
+
+  const currentMonthIncentives = await calculateIncentiveForTeacherMonth(db, userId, currentMonthStr);
+  const currentNetSalary = basicSalary + otoEarnings + groupEarnings + currentMonthIncentives + configBonus - configDeduction;
+
+  // 5. Performance Summary
+  const teacherCompletedClassesIds = groupClasses
+    .filter((cls) => cls.status === "completed")
+    .map((cls) => cls.id);
+
+  let avgStudentAttendancePct = 100;
+  if (teacherCompletedClassesIds.length > 0) {
+    const studentAttendanceRecords = await db
+      .select({
+        status: attendance.status,
+      })
+      .from(attendance)
+      .where(inArray(attendance.classId, teacherCompletedClassesIds));
+
+    if (studentAttendanceRecords.length > 0) {
+      const totalStudentAtt = studentAttendanceRecords.length;
+      const presentStudentAtt = studentAttendanceRecords.filter(
+        (r) => r.status === "present" || r.status === "late"
+      ).length;
+      avgStudentAttendancePct = Math.round((presentStudentAtt / totalStudentAtt) * 100);
+    }
+  }
+
+  const feedbackList = await db.query.feedback.findMany({
+    where: eq(feedback.teacherId, userId),
+  });
+  const avgFeedbackRating = feedbackList.length > 0
+    ? Math.round((feedbackList.reduce((sum, f) => sum + f.rating, 0) / feedbackList.length) * 10) / 10
+    : 5.0;
+
+  const performanceScore = Math.round(
+    (teacherAttendancePercentage * 0.4) +
+    (avgStudentAttendancePct * 0.3) +
+    ((avgFeedbackRating / 5) * 100 * 0.3)
+  );
+
+  const enrolledStudentIds = new Set<number>();
+  for (const batch of teacherBatches) {
+    const enrollments = await db.query.batchEnrollments.findMany({
+      where: eq(batchEnrollments.batchId, batch.id),
+    });
+    enrollments.forEach((e) => enrolledStudentIds.add(e.studentId));
+  }
+
+  return {
+    teacher: {
+      id: teacherUser.id,
+      unionId: teacherUser.unionId,
+      name: teacherUser.name,
+      email: teacherUser.email,
+      phone: teacherUser.phone,
+      status: teacherUser.status,
+      avatar: teacherUser.avatar,
+      createdAt: teacherUser.createdAt,
+    },
+    profile: teacherProfile ? {
+      gender: teacherProfile.gender,
+      dob: teacherProfile.dob,
+      educationalQualification: teacherProfile.educationalQualification,
+      specialization: (teacherProfile as any).specialization || "",
+      experience: (teacherProfile as any).experience || "",
+      address: (teacherProfile as any).address || "",
+      photo: teacherProfile.photo,
+    } : null,
+    batches: batchesDetails,
+    modules: modulesDetails,
+    teachingSummary: {
+      totalClassesAssigned,
+      totalClassesConducted,
+      totalClassesRemaining,
+      totalTeachingHours,
+      teacherAttendancePercentage,
+    },
+    oneToOneStats: {
+      min30: otoStats.min30,
+      min45: otoStats.min45,
+      min60: otoStats.min60,
+      total: {
+        assigned: otoTotalAssigned,
+        completed: otoTotalCompleted,
+        remaining: otoTotalRemaining,
+        earnings: otoEarnings,
+      }
+    },
+    groupStats: {
+      min30: groupStats.min30,
+      min45: groupStats.min45,
+      min60: groupStats.min60,
+      total: {
+        assigned: groupTotalAssigned,
+        completed: groupTotalCompleted,
+        remaining: groupTotalRemaining,
+        earnings: groupEarnings,
+      }
+    },
+    attendanceReport: {
+      workingDays,
+      presentDays,
+      absentDays,
+      leaveDays,
+      attendancePercentage: teacherAttendancePercentage,
+    },
+    salaryReport: {
+      config: {
+        basicSalary,
+        group30MinRate: configGroup30Rate,
+        group45MinRate: configGroup45Rate,
+        group60MinRate: configGroup60Rate,
+        oneToOne30MinRate: configOto30Rate,
+        oneToOne45MinRate: configOto45Rate,
+        oneToOne60MinRate: configOto60Rate,
+        bonusAmount: configBonus,
+        deductionAmount: configDeduction,
+      },
+      currentMonthBreakdown: {
+        month: currentMonthStr,
+        oneToOne: {
+          min30: { count: oto30CurrentMonth, earnings: oto30CurrentMonth * configOto30Rate },
+          min45: { count: oto45CurrentMonth, earnings: oto45CurrentMonth * configOto45Rate },
+          min60: { count: oto60CurrentMonth, earnings: oto60CurrentMonth * configOto60Rate },
+          totalEarnings: otoEarnings,
+        },
+        group: {
+          min30: { count: group30CurrentMonth, earnings: group30CurrentMonth * configGroup30Rate },
+          min45: { count: group45CurrentMonth, earnings: group45CurrentMonth * configGroup45Rate },
+          min60: { count: group60CurrentMonth, earnings: group60CurrentMonth * configGroup60Rate },
+          totalEarnings: groupEarnings,
+        },
+        summary: {
+          basicSalary,
+          oneToOneEarnings: otoEarnings,
+          groupEarnings,
+          incentives: currentMonthIncentives,
+          bonus: configBonus,
+          deductions: configDeduction,
+          netSalary: currentNetSalary,
+        }
+      },
+      history: salaryHistoryList.map(s => ({
+        id: s.id,
+        month: s.month,
+        classesConducted: (s.groupClassesCount || 0) + (s.oneToOneCount || 0),
+        salaryEarned: parseFloat(s.totalAmount || "0"),
+        paymentStatus: s.status || "pending",
+        paymentDate: s.paymentDate,
+      })),
+    },
+    salaries: salaryHistoryList.map(s => ({
+      id: s.id,
+      month: s.month,
+      classesConducted: (s.groupClassesCount || 0) + (s.oneToOneCount || 0),
+      salaryEarned: parseFloat(s.totalAmount || "0"),
+      paymentStatus: s.status || "pending",
+      paymentDate: s.paymentDate,
+    })),
+    performanceSummary: {
+      totalStudentsTaught: enrolledStudentIds.size,
+      totalBatchesManaged: teacherBatches.length,
+      totalClassesConducted: totalClassesConducted,
+      averageStudentAttendance: avgStudentAttendancePct,
+      studentFeedbackRating: avgFeedbackRating,
+      teacherPerformanceScore: performanceScore,
+    }
+  };
+}
+
 export const adminRouter = createRouter({
   // ─── Payments / Fees ────────────────────────────────────────────────────────
 
@@ -602,46 +1539,11 @@ export const adminRouter = createRouter({
         throw new TRPCError({ code: "FORBIDDEN", message: "Access Denied" });
       }
       const db = getDb();
-      const groupCount = await db.select({ count: sql<number>`count(*)` })
-        .from(classes)
-        .where(and(
-          eq(classes.teacherId, input.teacherId),
-          eq(classes.status, "completed"),
-          eq(classes.classType, "group"),
-          sql`TO_CHAR(${classes.scheduledAt}, 'YYYY-MM') = ${input.month}`,
-        ));
-      const oneToOneCount = await db.select({ count: sql<number>`count(*)` })
-        .from(oneToOneSessions)
-        .where(and(
-          eq(oneToOneSessions.teacherId, input.teacherId),
-          eq(oneToOneSessions.status, "completed"),
-          sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${input.month}`,
-        ));
-
-      const config = await db.query.teacherSalaryConfigs.findFirst({
-        where: eq(teacherSalaryConfigs.teacherId, input.teacherId),
-      });
-
-      const basicSalary = config ? parseFloat(config.basicSalary) : 0;
-      const groupClassRate = config ? parseFloat(config.groupClassRate) : (input.groupClassRate ?? 0);
-      const oneToOneRate = config ? parseFloat(config.oneToOneRate) : (input.oneToOneRate ?? 0);
-
-      const gc = Number(groupCount[0]?.count || 0);
-      const oc = Number(oneToOneCount[0]?.count || 0);
-      const total = basicSalary + gc * groupClassRate + oc * oneToOneRate;
-
-      const result = await db.insert(teacherSalaries).values({
-        teacherId: input.teacherId,
-        month: input.month,
-        groupClassesCount: gc,
-        oneToOneCount: oc,
-        basicSalary: String(basicSalary),
-        groupClassRate: String(groupClassRate),
-        oneToOneRate: String(oneToOneRate),
-        totalAmount: String(total),
-        status: "pending",
-      }).returning({ id: teacherSalaries.id });
-      return db.query.teacherSalaries.findFirst({ where: eq(teacherSalaries.id, result[0]?.id) });
+      const res = await recalculateSalaryInternal(db, input.teacherId, input.month, true);
+      if (!res) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to calculate salary" });
+      }
+      return res;
     }),
 
   getSalaryConfig: adminQuery
@@ -656,8 +1558,12 @@ export const adminRouter = createRouter({
       });
       return config ?? {
         basicSalary: "0.00",
-        groupClassRate: "0.00",
-        oneToOneRate: "0.00",
+        group30MinRate: "0.00",
+        group45MinRate: "0.00",
+        group60MinRate: "0.00",
+        oneToOne30MinRate: "0.00",
+        oneToOne45MinRate: "0.00",
+        oneToOne60MinRate: "0.00",
       };
     }),
 
@@ -665,8 +1571,14 @@ export const adminRouter = createRouter({
     .input(z.object({
       teacherId: z.number(),
       basicSalary: z.number().nonnegative(),
-      groupClassRate: z.number().nonnegative(),
-      oneToOneRate: z.number().nonnegative(),
+      group30MinRate: z.number().nonnegative(),
+      group45MinRate: z.number().nonnegative(),
+      group60MinRate: z.number().nonnegative(),
+      oneToOne30MinRate: z.number().nonnegative(),
+      oneToOne45MinRate: z.number().nonnegative(),
+      oneToOne60MinRate: z.number().nonnegative(),
+      bonusAmount: z.number().nonnegative().optional().default(0),
+      deductionAmount: z.number().nonnegative().optional().default(0),
     }))
     .mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== "super_admin") {
@@ -678,20 +1590,38 @@ export const adminRouter = createRouter({
       });
 
       const basicSalaryStr = String(input.basicSalary);
-      const groupClassRateStr = String(input.groupClassRate);
-      const oneToOneRateStr = String(input.oneToOneRate);
+      const group30MinRateStr = String(input.group30MinRate);
+      const group45MinRateStr = String(input.group45MinRate);
+      const group60MinRateStr = String(input.group60MinRate);
+      const oneToOne30MinRateStr = String(input.oneToOne30MinRate);
+      const oneToOne45MinRateStr = String(input.oneToOne45MinRate);
+      const oneToOne60MinRateStr = String(input.oneToOne60MinRate);
+      const bonusAmountStr = String(input.bonusAmount ?? 0);
+      const deductionAmountStr = String(input.deductionAmount ?? 0);
 
       const prevBasic = existing ? parseFloat(existing.basicSalary) : 0;
-      const prevGroup = existing ? parseFloat(existing.groupClassRate) : 0;
-      const prevOneToOne = existing ? parseFloat(existing.oneToOneRate) : 0;
+      const prevGroup30 = existing ? parseFloat(existing.group30MinRate) : 0;
+      const prevGroup45 = existing ? parseFloat(existing.group45MinRate) : 0;
+      const prevGroup60 = existing ? parseFloat(existing.group60MinRate) : 0;
+      const prevOneToOne30 = existing ? parseFloat(existing.oneToOne30MinRate) : 0;
+      const prevOneToOne45 = existing ? parseFloat(existing.oneToOne45MinRate) : 0;
+      const prevOneToOne60 = existing ? parseFloat(existing.oneToOne60MinRate) : 0;
+      const prevBonus = existing ? parseFloat(existing.bonusAmount) : 0;
+      const prevDeduction = existing ? parseFloat(existing.deductionAmount) : 0;
 
       // Update or insert configuration
       if (existing) {
         await db.update(teacherSalaryConfigs)
           .set({
             basicSalary: basicSalaryStr,
-            groupClassRate: groupClassRateStr,
-            oneToOneRate: oneToOneRateStr,
+            group30MinRate: group30MinRateStr,
+            group45MinRate: group45MinRateStr,
+            group60MinRate: group60MinRateStr,
+            oneToOne30MinRate: oneToOne30MinRateStr,
+            oneToOne45MinRate: oneToOne45MinRateStr,
+            oneToOne60MinRate: oneToOne60MinRateStr,
+            bonusAmount: bonusAmountStr,
+            deductionAmount: deductionAmountStr,
             updatedAt: new Date(),
           })
           .where(eq(teacherSalaryConfigs.id, existing.id));
@@ -699,44 +1629,48 @@ export const adminRouter = createRouter({
         await db.insert(teacherSalaryConfigs).values({
           teacherId: input.teacherId,
           basicSalary: basicSalaryStr,
-          groupClassRate: groupClassRateStr,
-          oneToOneRate: oneToOneRateStr,
+          group30MinRate: group30MinRateStr,
+          group45MinRate: group45MinRateStr,
+          group60MinRate: group60MinRateStr,
+          oneToOne30MinRate: oneToOne30MinRateStr,
+          oneToOne45MinRate: oneToOne45MinRateStr,
+          oneToOne60MinRate: oneToOne60MinRateStr,
+          bonusAmount: bonusAmountStr,
+          deductionAmount: deductionAmountStr,
         });
       }
 
       // Log changes to audit trail
-      const auditEntries = [];
-      if (input.basicSalary !== prevBasic) {
-        auditEntries.push({
-          teacherId: input.teacherId,
-          fieldName: "basicSalary",
-          previousValue: String(prevBasic),
-          newValue: basicSalaryStr,
-          changedBy: ctx.user.id,
-        });
-      }
-      if (input.groupClassRate !== prevGroup) {
-        auditEntries.push({
-          teacherId: input.teacherId,
-          fieldName: "groupClassRate",
-          previousValue: String(prevGroup),
-          newValue: groupClassRateStr,
-          changedBy: ctx.user.id,
-        });
-      }
-      if (input.oneToOneRate !== prevOneToOne) {
-        auditEntries.push({
-          teacherId: input.teacherId,
-          fieldName: "oneToOneRate",
-          previousValue: String(prevOneToOne),
-          newValue: oneToOneRateStr,
-          changedBy: ctx.user.id,
-        });
-      }
+      const auditEntries: any[] = [];
+      const addAuditLog = (fieldName: string, prev: number, curr: string) => {
+        if (parseFloat(curr) !== prev) {
+          auditEntries.push({
+            teacherId: input.teacherId,
+            fieldName,
+            previousValue: String(prev),
+            newValue: curr,
+            changedBy: ctx.user.id,
+          });
+        }
+      };
+
+      addAuditLog("basicSalary", prevBasic, basicSalaryStr);
+      addAuditLog("group30MinRate", prevGroup30, group30MinRateStr);
+      addAuditLog("group45MinRate", prevGroup45, group45MinRateStr);
+      addAuditLog("group60MinRate", prevGroup60, group60MinRateStr);
+      addAuditLog("oneToOne30MinRate", prevOneToOne30, oneToOne30MinRateStr);
+      addAuditLog("oneToOne45MinRate", prevOneToOne45, oneToOne45MinRateStr);
+      addAuditLog("oneToOne60MinRate", prevOneToOne60, oneToOne60MinRateStr);
+      addAuditLog("bonusAmount", prevBonus, bonusAmountStr);
+      addAuditLog("deductionAmount", prevDeduction, deductionAmountStr);
 
       if (auditEntries.length > 0) {
         await db.insert(teacherSalaryConfigAuditLogs).values(auditEntries);
       }
+
+      // Automatically recalculate the current month's salary if a record exists
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      await recalculateSalaryInternal(db, input.teacherId, currentMonth);
 
       return { success: true };
     }),
@@ -1178,61 +2112,159 @@ export const adminRouter = createRouter({
     };
   }),
 
+  searchStudents: adminQuery
+    .input(z.object({ search: z.string() }))
+    .query(async ({ input }) => {
+      const db = getDb();
+      const query = `%${input.search.trim()}%`;
+      
+      const results = await db
+        .select({
+          id: users.id,
+          name: users.name,
+          unionId: users.unionId,
+          enrollmentId: profiles.enrollmentId,
+          course: profiles.course,
+          batch: profiles.batch,
+        })
+        .from(users)
+        .leftJoin(profiles, eq(users.id, profiles.userId))
+        .where(
+          and(
+            eq(users.role, "student"),
+            or(
+              ilike(users.name, query),
+              ilike(users.unionId, query),
+              ilike(profiles.enrollmentId, query)
+            )
+          )
+        )
+        .limit(20);
+
+      return results;
+    }),
+
   getStudentReport: adminQuery
     .input(z.object({ studentId: z.union([z.number(), z.string()]) }))
     .query(async ({ input }) => {
       const db = getDb();
 
-      let userId: number;
-      if (typeof input.studentId === "string") {
-        const parsed = parseInt(input.studentId, 10);
-        if (!isNaN(parsed) && String(parsed) === input.studentId.trim()) {
+      let userId: number | null = null;
+      if (typeof input.studentId === "number") {
+        userId = input.studentId;
+      } else {
+        const trimmed = input.studentId.trim();
+        const parsed = parseInt(trimmed, 10);
+        if (!isNaN(parsed) && String(parsed) === trimmed) {
           userId = parsed;
         } else {
-          const u = await db.query.users.findFirst({
-            where: eq(users.unionId, input.studentId),
+          // Exact match check
+          const userByUnion = await db.query.users.findFirst({
+            where: and(eq(users.role, "student"), eq(users.unionId, trimmed)),
           });
-          if (!u) throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
-          userId = u.id;
+          if (userByUnion) {
+            userId = userByUnion.id;
+          } else {
+            const profileByEnrollment = await db.query.profiles.findFirst({
+              where: eq(profiles.enrollmentId, trimmed),
+            });
+            if (profileByEnrollment) {
+              userId = profileByEnrollment.userId;
+            } else {
+              // Partial match fallback: return first user matching the search string
+              const partialMatches = await db
+                .select({ id: users.id })
+                .from(users)
+                .leftJoin(profiles, eq(users.id, profiles.userId))
+                .where(
+                  and(
+                    eq(users.role, "student"),
+                    or(
+                      ilike(users.unionId, `%${trimmed}%`),
+                      ilike(profiles.enrollmentId, `%${trimmed}%`),
+                      ilike(users.name, `%${trimmed}%`)
+                    )
+                  )
+                )
+                .limit(1);
+              if (partialMatches.length > 0) {
+                userId = partialMatches[0].id;
+              }
+            }
+          }
         }
-      } else {
-        userId = input.studentId;
       }
 
-      const profile = await db.query.profiles.findFirst({
-        where: eq(profiles.userId, userId),
-      });
-      const activeEnrollment = await db.query.batchEnrollments.findFirst({
-        where: and(
-          eq(batchEnrollments.studentId, userId),
-          eq(batchEnrollments.status, "active")
-        ),
-      });
-      const attendanceRecords = await db.query.attendance.findMany({
-        where: eq(attendance.studentId, userId),
-      });
-      const total = attendanceRecords.length;
-      const present = attendanceRecords.filter((a) => a.status === "present").length;
-      const paymentsList = await db.query.payments.findMany({
-        where: eq(payments.studentId, userId),
-      });
+      if (!userId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "No matching student found." });
+      }
 
-      return {
-        attendance: {
-          total,
-          present,
-          percentage: total > 0 ? Math.round((present / total) * 100) : 0,
-        },
-        payments: paymentsList,
-        profile,
-        paymentType: activeEnrollment?.paymentType || "FULL_PAYMENT",
-      };
+      return await fetchFullStudentReportData(db, userId);
     }),
 
   // Tasks 13.1 + 13.2 — teacher report with performance classification
+  searchTeachers: adminQuery
+    .input(z.object({
+      search: z.string().optional(),
+      status: z.string().optional(),
+      batchId: z.number().optional()
+    }).default({}))
+    .query(async ({ input }) => {
+      const db = getDb();
+      let conditions = [eq(users.role, "teacher")];
+
+      if (input.search && input.search.trim()) {
+        const query = `%${input.search.trim()}%`;
+        const cond = or(
+          ilike(users.name, query),
+          ilike(users.unionId, query)
+        );
+        if (cond) conditions.push(cond);
+      }
+
+      if (input.status && input.status !== "all") {
+        const mappedStatus = (input.status === "on_leave" ? "on_hold" : input.status) as "active" | "inactive" | "suspended" | "on_hold";
+        conditions.push(eq(users.status, mappedStatus));
+      }
+
+      let results;
+      if (input.batchId) {
+        results = await db
+          .select({
+            id: users.id,
+            name: users.name,
+            unionId: users.unionId,
+            status: users.status,
+            email: users.email,
+            phone: users.phone,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .innerJoin(batches, eq(users.id, batches.teacherId))
+          .where(and(...conditions, eq(batches.id, input.batchId)))
+          .limit(50);
+      } else {
+        results = await db
+          .select({
+            id: users.id,
+            name: users.name,
+            unionId: users.unionId,
+            status: users.status,
+            email: users.email,
+            phone: users.phone,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(and(...conditions))
+          .limit(50);
+      }
+
+      return results;
+    }),
+
   getTeacherReport: adminQuery
     .input(z.object({ teacherId: z.union([z.number(), z.string()]) }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = getDb();
 
       let userId: number;
@@ -1242,7 +2274,7 @@ export const adminRouter = createRouter({
           userId = parsed;
         } else {
           const u = await db.query.users.findFirst({
-            where: eq(users.unionId, input.teacherId),
+            where: and(eq(users.role, "teacher"), eq(users.unionId, input.teacherId)),
           });
           if (!u) throw new TRPCError({ code: "NOT_FOUND", message: "Teacher not found with this ID" });
           userId = u.id;
@@ -1251,81 +2283,31 @@ export const adminRouter = createRouter({
         userId = input.teacherId;
       }
 
-      // Total completed classes handled
-      const teacherClasses = await db.query.classes.findMany({
-        where: and(
-          eq(classes.teacherId, userId),
-          eq(classes.status, "completed"),
-        ),
-      });
-      const totalClasses = teacherClasses.length;
-
-      // Student engagement rate: avg chat count per class
-      let totalChatCount = 0;
-      for (const cls of teacherClasses) {
-        const records = await db.query.attendance.findMany({
-          where: eq(attendance.classId, cls.id),
-        });
-        totalChatCount += records.reduce((sum, r) => sum + (r.chatCount ?? 0), 0);
+      const report = await fetchFullTeacherReportData(db, userId);
+      if (ctx.user.role === "academic_head") {
+        report.salaries = [];
+        report.salaryReport = {
+          config: {
+            basicSalary: 0,
+            group30MinRate: 0,
+            group45MinRate: 0,
+            group60MinRate: 0,
+            oneToOne30MinRate: 0,
+            oneToOne45MinRate: 0,
+            oneToOne60MinRate: 0,
+            bonusAmount: 0,
+            deductionAmount: 0,
+          },
+          currentMonthBreakdown: {
+            month: "",
+            oneToOne: { min30: { count: 0, earnings: 0 }, min45: { count: 0, earnings: 0 }, min60: { count: 0, earnings: 0 }, totalEarnings: 0 },
+            group: { min30: { count: 0, earnings: 0 }, min45: { count: 0, earnings: 0 }, min60: { count: 0, earnings: 0 }, totalEarnings: 0 },
+            summary: { basicSalary: 0, oneToOneEarnings: 0, groupEarnings: 0, incentives: 0, bonus: 0, deductions: 0, netSalary: 0 }
+          },
+          history: []
+        };
       }
-      const studentEngagementRate = totalClasses > 0 ? totalChatCount / totalClasses : 0;
-
-      // Student retention rate: active enrollments / total enrollments for teacher's batches
-      const teacherBatches = await db.query.batches.findMany({
-        where: eq(batches.teacherId, userId),
-      });
-      let totalEnrollments = 0;
-      let activeEnrollments = 0;
-      for (const batch of teacherBatches) {
-        const enrollments = await db.query.batchEnrollments.findMany({
-          where: eq(batchEnrollments.batchId, batch.id),
-        });
-        totalEnrollments += enrollments.length;
-        activeEnrollments += enrollments.filter((e) => e.status === "active").length;
-      }
-      const studentRetentionRate = totalEnrollments > 0
-        ? Math.round((activeEnrollments / totalEnrollments) * 100)
-        : 0;
-
-      // Course completion rate: students who have a completionDate / total enrolled students
-      const enrolledStudentIds = new Set<number>();
-      for (const batch of teacherBatches) {
-        const enrollments = await db.query.batchEnrollments.findMany({
-          where: eq(batchEnrollments.batchId, batch.id),
-        });
-        enrollments.forEach((e) => enrolledStudentIds.add(e.studentId));
-      }
-      const totalStudents = enrolledStudentIds.size;
-      let completedStudents = 0;
-      for (const studentId of enrolledStudentIds) {
-        const profile = await db.query.profiles.findFirst({
-          where: eq(profiles.userId, studentId),
-        });
-        if (profile?.completionDate) completedStudents++;
-      }
-      const courseCompletionRate = totalStudents > 0
-        ? Math.round((completedStudents / totalStudents) * 100)
-        : 0;
-
-      // Task 13.2 — student completion rate classification
-      const studentCompletionRate = courseCompletionRate;
-      let performanceLabel: string;
-      if (studentCompletionRate === 100) {
-        performanceLabel = "Best";
-      } else if (studentCompletionRate < 60) {
-        performanceLabel = "Needs Improvement";
-      } else {
-        performanceLabel = "Average";
-      }
-
-      return {
-        totalClasses,
-        studentEngagementRate: Math.round(studentEngagementRate * 100) / 100,
-        studentRetentionRate,
-        courseCompletionRate,
-        studentCompletionRate,
-        performanceLabel,
-      };
+      return report;
     }),
 
   // Task 13.3 — ranked teacher list by studentCompletionRate
@@ -1425,42 +2407,62 @@ export const adminRouter = createRouter({
     .query(async ({ input }) => {
       const db = getDb();
 
-      let userId: number;
-      if (typeof input.studentId === "string") {
-        const parsed = parseInt(input.studentId, 10);
-        if (!isNaN(parsed) && String(parsed) === input.studentId.trim()) {
+      let userId: number | null = null;
+      if (typeof input.studentId === "number") {
+        userId = input.studentId;
+      } else {
+        const trimmed = input.studentId.trim();
+        const parsed = parseInt(trimmed, 10);
+        if (!isNaN(parsed) && String(parsed) === trimmed) {
           userId = parsed;
         } else {
-          const u = await db.query.users.findFirst({
-            where: eq(users.unionId, input.studentId),
+          // Exact match check
+          const userByUnion = await db.query.users.findFirst({
+            where: and(eq(users.role, "student"), eq(users.unionId, trimmed)),
           });
-          if (!u) throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
-          userId = u.id;
+          if (userByUnion) {
+            userId = userByUnion.id;
+          } else {
+            const profileByEnrollment = await db.query.profiles.findFirst({
+              where: eq(profiles.enrollmentId, trimmed),
+            });
+            if (profileByEnrollment) {
+              userId = profileByEnrollment.userId;
+            } else {
+              // Partial match fallback
+              const partialMatches = await db
+                .select({ id: users.id })
+                .from(users)
+                .leftJoin(profiles, eq(users.id, profiles.userId))
+                .where(
+                  and(
+                    eq(users.role, "student"),
+                    or(
+                      ilike(users.unionId, `%${trimmed}%`),
+                      ilike(profiles.enrollmentId, `%${trimmed}%`),
+                      ilike(users.name, `%${trimmed}%`)
+                    )
+                  )
+                )
+                .limit(1);
+              if (partialMatches.length > 0) {
+                userId = partialMatches[0].id;
+              }
+            }
+          }
         }
-      } else {
-        userId = input.studentId;
       }
 
-      const student = await db.query.users.findFirst({ where: eq(users.id, userId) });
-      const profile = await db.query.profiles.findFirst({ where: eq(profiles.userId, userId) });
-      const attendanceRecords = await db.query.attendance.findMany({
-        where: eq(attendance.studentId, userId),
-      });
-      const total = attendanceRecords.length;
-      const present = attendanceRecords.filter((a) => a.status === "present").length;
-      const paymentsList = await db.query.payments.findMany({
-        where: eq(payments.studentId, userId),
-      });
+      if (!userId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "No matching student found." });
+      }
+
+      const reportData = await fetchFullStudentReportData(db, userId);
 
       return {
         format: input.format,
         message: "Use this structured data for client-side report generation.",
-        data: {
-          student: student ? { id: student.id, name: student.name, email: student.email } : null,
-          profile,
-          attendance: { total, present, percentage: total > 0 ? Math.round((present / total) * 100) : 0 },
-          payments: paymentsList,
-        },
+        data: reportData,
       };
     }),
 
@@ -1479,7 +2481,7 @@ export const adminRouter = createRouter({
           userId = parsed;
         } else {
           const u = await db.query.users.findFirst({
-            where: eq(users.unionId, input.teacherId),
+            where: and(eq(users.role, "teacher"), eq(users.unionId, input.teacherId)),
           });
           if (!u) throw new TRPCError({ code: "NOT_FOUND", message: "Teacher not found with this ID" });
           userId = u.id;
@@ -1488,24 +2490,35 @@ export const adminRouter = createRouter({
         userId = input.teacherId;
       }
 
-      const teacher = await db.query.users.findFirst({ where: eq(users.id, userId) });
-      const teacherClasses = await db.query.classes.findMany({
-        where: and(eq(classes.teacherId, userId), eq(classes.status, "completed")),
-      });
-      const salaries = ctx.user.role === "academic_head"
-        ? []
-        : await db.query.teacherSalaries.findMany({
-            where: eq(teacherSalaries.teacherId, userId),
-          });
+      const reportData = await fetchFullTeacherReportData(db, userId);
+      if (ctx.user.role === "academic_head") {
+        reportData.salaries = [];
+        reportData.salaryReport = {
+          config: {
+            basicSalary: 0,
+            group30MinRate: 0,
+            group45MinRate: 0,
+            group60MinRate: 0,
+            oneToOne30MinRate: 0,
+            oneToOne45MinRate: 0,
+            oneToOne60MinRate: 0,
+            bonusAmount: 0,
+            deductionAmount: 0,
+          },
+          currentMonthBreakdown: {
+            month: "",
+            oneToOne: { min30: { count: 0, earnings: 0 }, min45: { count: 0, earnings: 0 }, min60: { count: 0, earnings: 0 }, totalEarnings: 0 },
+            group: { min30: { count: 0, earnings: 0 }, min45: { count: 0, earnings: 0 }, min60: { count: 0, earnings: 0 }, totalEarnings: 0 },
+            summary: { basicSalary: 0, oneToOneEarnings: 0, groupEarnings: 0, incentives: 0, bonus: 0, deductions: 0, netSalary: 0 }
+          },
+          history: []
+        };
+      }
 
       return {
         format: input.format,
         message: "Use this structured data for client-side report generation.",
-        data: {
-          teacher: teacher ? { id: teacher.id, name: teacher.name, email: teacher.email } : null,
-          totalCompletedClasses: teacherClasses.length,
-          salaries,
-        },
+        data: reportData,
       };
     }),
 

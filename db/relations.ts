@@ -42,6 +42,8 @@ import {
   communitySuccessStories,
   communityLessonViews,
   communityActiveUsers,
+  salesExecutives,
+  studentCourseAuditLogs,
 } from "./schema";
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -73,6 +75,16 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   createdOneToOneSessions: many(oneToOneSessions, { relationName: "oneToOneCreator" }),
   sessionAllocationLogs: many(sessionAllocationLogs, { relationName: "studentAllocationLogs" }),
   changedSessionAllocationLogs: many(sessionAllocationLogs, { relationName: "adminAllocationLogs" }),
+  salesProfile: one(salesExecutives, {
+    fields: [users.id],
+    references: [salesExecutives.userId],
+    relationName: "salesExecutiveUser",
+  }),
+  assignedSalesExecutive: one(salesExecutives, {
+    fields: [users.salesExecutiveId],
+    references: [salesExecutives.id],
+    relationName: "referredStudents",
+  }),
 }));
 
 export const profilesRelations = relations(profiles, ({ one }) => ({
@@ -548,6 +560,25 @@ export const communityActiveUsersRelations = relations(communityActiveUsers, ({ 
   }),
 }));
 
+export const salesExecutivesRelations = relations(salesExecutives, ({ one, many }) => ({
+  user: one(users, {
+    fields: [salesExecutives.userId],
+    references: [users.id],
+    relationName: "salesExecutiveUser",
+  }),
+  referredStudents: many(users, {
+    relationName: "referredStudents",
+  }),
+}));
 
 
-
+export const studentCourseAuditLogsRelations = relations(studentCourseAuditLogs, ({ one }) => ({
+  student: one(users, {
+    fields: [studentCourseAuditLogs.studentId],
+    references: [users.id],
+  }),
+  changedByUser: one(users, {
+    fields: [studentCourseAuditLogs.changedBy],
+    references: [users.id],
+  }),
+}));

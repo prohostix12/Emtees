@@ -15,7 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 // Enums
-export const roleEnum = pgEnum("role", ["super_admin", "admin", "academic_head", "teacher", "student"]);
+export const roleEnum = pgEnum("role", ["super_admin", "admin", "academic_head", "teacher", "student", "sales_executive"]);
 export const statusEnum = pgEnum("status", ["active", "inactive", "suspended", "on_hold"]);
 export const paymentStatusEnum = pgEnum("payment_status", ["paid", "partial", "unpaid", "overdue"]);
 export const messageTypeEnum = pgEnum("message_type", ["text", "voice", "image", "video", "pdf"]);
@@ -39,7 +39,9 @@ export const users = pgTable(
     email: varchar("email", { length: 320 }),
     phone: varchar("phone", { length: 20 }),
     countryCode: varchar("country_code", { length: 10 }),
+    countryISO: varchar("country_iso", { length: 10 }),
     phoneNumber: varchar("phone_number", { length: 20 }),
+    fullInternationalNumber: varchar("full_international_number", { length: 50 }),
     role: roleEnum("role").notNull().default("student"),
     status: statusEnum("status").notNull().default("active"),
     avatar: varchar("avatar", { length: 500 }),
@@ -50,6 +52,9 @@ export const users = pgTable(
     mustChangePassword: boolean("must_change_password").default(false).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    salesExecutiveId: integer("sales_executive_id"),
+    referralCode: varchar("referral_code", { length: 50 }),
+    registrationSource: varchar("registration_source", { length: 50 }).default("direct"),
   },
   (table) => ({
     usernameIdx: uniqueIndex("username_idx").on(table.username),
@@ -57,40 +62,68 @@ export const users = pgTable(
     roleIdx: index("role_idx").on(table.role),
     unionIdIdx: uniqueIndex("union_id_idx").on(table.unionId),
     countryPhoneIdx: uniqueIndex("country_phone_idx").on(table.countryCode, table.phoneNumber),
+    fullInternationalNumberIdx: uniqueIndex("full_int_phone_idx").on(table.fullInternationalNumber),
   })
 );
 
 // Profiles table
-export const profiles = pgTable("profiles", {
-  id: serial("id").primaryKey(),
-  userId: bigint("user_id", { mode: "number" })
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  course: varchar("course", { length: 255 }),
-  batch: varchar("batch", { length: 255 }),
-  batchTime: varchar("batch_time", { length: 50 }),
-  feesTotal: decimal("fees_total", { precision: 10, scale: 2 }).default("0"),
-  feesPaid: decimal("fees_paid", { precision: 10, scale: 2 }).default("0"),
-  feesBalance: decimal("fees_balance", { precision: 10, scale: 2 }).default("0"),
-  paymentStatus: paymentStatusEnum("payment_status").default("unpaid"),
-  minInitialPayment: decimal("min_initial_payment", { precision: 10, scale: 2 }),
-  paymentDueDate: timestamp("payment_due_date"),
-  gracePeriodDays: integer("grace_period_days").default(7).notNull(),
-  admissionDate: timestamp("admission_date").defaultNow(),
-  completionDate: timestamp("completion_date"),
-  activityTimeline: json("activity_timeline"),
-  allocatedOneToOneSessions: integer("allocated_one_to_one_sessions").default(0).notNull(),
-  allocatedGroupSessions: integer("allocated_group_sessions").default(0).notNull(),
-  totalAllocatedSessions: integer("total_allocated_sessions").default(0).notNull(),
-  attendedOneToOneSessions: integer("attended_one_to_one_sessions").default(0).notNull(),
-  attendedGroupSessions: integer("attended_group_sessions").default(0).notNull(),
-  totalAttendedSessions: integer("total_attended_sessions").default(0).notNull(),
-  remainingOneToOneSessions: integer("remaining_one_to_one_sessions").default(0).notNull(),
-  remainingGroupSessions: integer("remaining_group_sessions").default(0).notNull(),
-  totalRemainingSessions: integer("total_remaining_sessions").default(0).notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+export const profiles = pgTable(
+  "profiles",
+  {
+    id: serial("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    enrollmentId: varchar("enrollment_id", { length: 255 }),
+    course: varchar("course", { length: 255 }),
+    batch: varchar("batch", { length: 255 }),
+    batchTime: varchar("batch_time", { length: 50 }),
+    feesTotal: decimal("fees_total", { precision: 10, scale: 2 }).default("0"),
+    feesPaid: decimal("fees_paid", { precision: 10, scale: 2 }).default("0"),
+    feesBalance: decimal("fees_balance", { precision: 10, scale: 2 }).default("0"),
+    paymentStatus: paymentStatusEnum("payment_status").default("unpaid"),
+    minInitialPayment: decimal("min_initial_payment", { precision: 10, scale: 2 }),
+    paymentDueDate: timestamp("payment_due_date"),
+    gracePeriodDays: integer("grace_period_days").default(7).notNull(),
+    admissionDate: timestamp("admission_date").defaultNow(),
+    completionDate: timestamp("completion_date"),
+    activityTimeline: json("activity_timeline"),
+    packageConfig: json("package_config").default({
+      oneToOne: { total: 0, min30: 0, min45: 0, min60: 0 },
+      group: { total: 0, min30: 0, min45: 0, min60: 0 }
+    }),
+    allocatedOneToOneSessions: integer("allocated_one_to_one_sessions").default(0).notNull(),
+    allocatedGroupSessions: integer("allocated_group_sessions").default(0).notNull(),
+    totalAllocatedSessions: integer("total_allocated_sessions").default(0).notNull(),
+    attendedOneToOneSessions: integer("attended_one_to_one_sessions").default(0).notNull(),
+    attendedGroupSessions: integer("attended_group_sessions").default(0).notNull(),
+    totalAttendedSessions: integer("total_attended_sessions").default(0).notNull(),
+    remainingOneToOneSessions: integer("remaining_one_to_one_sessions").default(0).notNull(),
+    remainingGroupSessions: integer("remaining_group_sessions").default(0).notNull(),
+    totalRemainingSessions: integer("total_remaining_sessions").default(0).notNull(),
+    documents: json("documents").default([]),
+    gender: varchar("gender", { length: 50 }),
+    dob: timestamp("dob"),
+    educationalQualification: text("educational_qualification"),
+    specialization: text("specialization"),
+    experience: text("experience"),
+    address: text("address"),
+    parentName: varchar("parent_name", { length: 255 }),
+    parentPhone: varchar("parent_phone", { length: 20 }),
+    parentCountryCode: varchar("parent_country_code", { length: 10 }),
+    parentCountryISO: varchar("parent_country_iso", { length: 10 }),
+    parentPhoneNumber: varchar("parent_phone_number", { length: 20 }),
+    parentFullInternationalNumber: varchar("parent_full_international_number", { length: 50 }),
+    notes: text("notes"),
+    photo: varchar("photo", { length: 500 }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    enrollmentIdUnique: uniqueIndex("enrollment_id_unique").on(table.enrollmentId),
+    parentFullPhoneIdx: index("parent_full_phone_idx").on(table.parentFullInternationalNumber),
+  })
+);
 
 // Modules (Course Groups)
 export const modules = pgTable("modules", {
@@ -171,6 +204,7 @@ export const batchEnrollments = pgTable(
     leftAt: timestamp("left_at"),
     status: varchar("status", { length: 20 }).default("active"),
     paymentType: varchar("payment_type", { length: 50 }).default("FULL_PAYMENT").notNull(),
+    assignedTeachers: json("assigned_teachers").default([]),
   },
   (table) => ({
     uniqueEnrollment: uniqueIndex("unique_enrollment_idx").on(table.batchId, table.studentId),
@@ -222,6 +256,7 @@ export const classes = pgTable("classes", {
   startedAt: timestamp("started_at"),
   endedAt: timestamp("ended_at"),
   duration: integer("duration").default(0),
+  actualDuration: integer("actual_duration"),
   meetingUrl: varchar("meeting_url", { length: 500 }),
   meetingRoomId: varchar("meeting_room_id", { length: 255 }),
   recordingUrl: varchar("recording_url", { length: 500 }),
@@ -353,8 +388,22 @@ export const teacherSalaries = pgTable("teacher_salaries", {
   groupClassesCount: integer("group_classes_count").default(0),
   oneToOneCount: integer("one_to_one_count").default(0),
   basicSalary: decimal("basic_salary", { precision: 10, scale: 2 }).default("0"),
-  groupClassRate: decimal("group_class_rate", { precision: 10, scale: 2 }).default("0"),
-  oneToOneRate: decimal("one_to_one_rate", { precision: 10, scale: 2 }).default("0"),
+  group30MinCount: integer("group_30min_count").default(0),
+  group45MinCount: integer("group_45min_count").default(0),
+  group60MinCount: integer("group_60min_count").default(0),
+  oneToOne30MinCount: integer("one_to_one_30min_count").default(0),
+  oneToOne45MinCount: integer("one_to_one_45min_count").default(0),
+  oneToOne60MinCount: integer("one_to_one_60min_count").default(0),
+  group30MinRate: decimal("group_30min_rate", { precision: 10, scale: 2 }).default("0"),
+  group45MinRate: decimal("group_45min_rate", { precision: 10, scale: 2 }).default("0"),
+  group60MinRate: decimal("group_60min_rate", { precision: 10, scale: 2 }).default("0"),
+  oneToOne30MinRate: decimal("one_to_one_30min_rate", { precision: 10, scale: 2 }).default("0"),
+  oneToOne45MinRate: decimal("one_to_one_45min_rate", { precision: 10, scale: 2 }).default("0"),
+  oneToOne60MinRate: decimal("one_to_one_60min_rate", { precision: 10, scale: 2 }).default("0"),
+  bonusAmount: decimal("bonus_amount", { precision: 10, scale: 2 }).default("0"),
+  deductionAmount: decimal("deduction_amount", { precision: 10, scale: 2 }).default("0"),
+  incentiveAmount: decimal("incentive_amount", { precision: 10, scale: 2 }).default("0"),
+  netSalary: decimal("net_salary", { precision: 10, scale: 2 }).default("0"),
   totalAmount: decimal("total_amount", { precision: 10, scale: 2 }).default("0"),
   status: varchar("status", { length: 20 }).default("pending"),
   paymentDate: timestamp("payment_date"),
@@ -369,8 +418,14 @@ export const teacherSalaryConfigs = pgTable("teacher_salary_configs", {
     .references(() => users.id, { onDelete: "cascade" })
     .unique(),
   basicSalary: decimal("basic_salary", { precision: 10, scale: 2 }).default("0").notNull(),
-  groupClassRate: decimal("group_class_rate", { precision: 10, scale: 2 }).default("0").notNull(),
-  oneToOneRate: decimal("one_to_one_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  group30MinRate: decimal("group_30min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  group45MinRate: decimal("group_45min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  group60MinRate: decimal("group_60min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  oneToOne30MinRate: decimal("one_to_one_30min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  oneToOne45MinRate: decimal("one_to_one_45min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  oneToOne60MinRate: decimal("one_to_one_60min_rate", { precision: 10, scale: 2 }).default("0").notNull(),
+  bonusAmount: decimal("bonus_amount", { precision: 10, scale: 2 }).default("0").notNull(),
+  deductionAmount: decimal("deduction_amount", { precision: 10, scale: 2 }).default("0").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -478,27 +533,21 @@ export const learningMaterials = pgTable("learning_materials", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-// OTP Codes
-export const otpCodes = pgTable(
-  "otp_codes",
-  {
-    id: serial("id").primaryKey(),
-    phone: varchar("phone", { length: 20 }).notNull(),
-    code: varchar("code", { length: 10 }).notNull(),
-    expiresAt: timestamp("expires_at").notNull(),
-    used: boolean("used").default(false),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-  },
-  (table) => ({
-    phoneIdx: index("otp_phone_idx").on(table.phone),
-  })
-);
-
 // ID Sequences for role-based unique IDs
 export const idSequences = pgTable("id_sequences", {
   rolePrefix: varchar("role_prefix", { length: 10 }).primaryKey(),
   lastValue: integer("last_value").notNull().default(0),
 });
+
+// Student ID Sequence table for Admission Number generation
+export const studentIdSequence = pgTable("student_id_sequence", {
+  prefix: varchar("prefix", { length: 50 }).primaryKey(),
+  lastNumber: integer("last_number").notNull().default(0),
+  numberLength: integer("number_length").notNull().default(4),
+});
+
+export type StudentIdSequence = typeof studentIdSequence.$inferSelect;
+export type InsertStudentIdSequence = typeof studentIdSequence.$inferInsert;
 
 // Private Messages Table
 export const privateMessages = pgTable(
@@ -641,6 +690,24 @@ export const sessionAllocationLogs = pgTable("session_allocation_logs", {
 
 export type SessionAllocationLog = typeof sessionAllocationLogs.$inferSelect;
 export type InsertSessionAllocationLog = typeof sessionAllocationLogs.$inferInsert;
+
+// Student Course Audit Logs Table
+export const studentCourseAuditLogs = pgTable("student_course_audit_logs", {
+  id: serial("id").primaryKey(),
+  studentId: bigint("student_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  changedBy: bigint("changed_by", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  changeType: varchar("change_type", { length: 50 }).notNull(), // 'teacher_changed' | 'class_count_updated' | 'session_distribution_updated' | 'batch_changed'
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+});
+
+export type StudentCourseAuditLog = typeof studentCourseAuditLogs.$inferSelect;
+export type InsertStudentCourseAuditLog = typeof studentCourseAuditLogs.$inferInsert;
 
 // One-to-One Reschedule Requests Table
 export const oneToOneRescheduleRequests = pgTable("one_to_one_reschedule_requests", {
@@ -928,6 +995,34 @@ export type InsertCommunitySuccessStory = typeof communitySuccessStories.$inferI
 export type CommunityLessonView = typeof communityLessonViews.$inferSelect;
 export type CommunityActiveUser = typeof communityActiveUsers.$inferSelect;
 
-
-
+// Sales Executives Table
+export const salesExecutives = pgTable(
+  "sales_executives",
+  {
+    id: serial("id").primaryKey(),
+    userId: bigint("user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    employeeId: varchar("employee_id", { length: 50 }).notNull().unique(),
+    name: varchar("name", { length: 255 }).notNull(),
+    email: varchar("email", { length: 320 }),
+    phone: varchar("phone", { length: 50 }),
+    countryCode: varchar("country_code", { length: 10 }),
+    countryISO: varchar("country_iso", { length: 10 }),
+    phoneNumber: varchar("phone_number", { length: 20 }),
+    fullInternationalNumber: varchar("full_international_number", { length: 50 }),
+    username: varchar("username", { length: 100 }).notNull(),
+    password: varchar("password", { length: 255 }).notNull(),
+    referralCode: varchar("referral_code", { length: 50 }).notNull().unique(),
+    status: varchar("status", { length: 50 }).notNull().default("active"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    referralCodeIdx: uniqueIndex("referral_code_idx").on(table.referralCode),
+    employeeIdIdx: uniqueIndex("employee_id_idx").on(table.employeeId),
+    execPhoneIdx: uniqueIndex("exec_full_phone_idx").on(table.fullInternationalNumber),
+  })
+);
+export type SalesExecutive = typeof salesExecutives.$inferSelect;
+export type InsertSalesExecutive = typeof salesExecutives.$inferInsert;
 

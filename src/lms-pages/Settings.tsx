@@ -9,10 +9,59 @@ import { toast } from "sonner";
 import { Settings, Bell, Shield, Zap, Lock, User, AlertTriangle, Eye, EyeOff } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { trpc } from "@/providers/trpc";
-import { COUNTRY_CODES, validatePhoneNumber } from "@contracts/validation";
+import { validatePhoneNumber } from "@contracts/validation";
+import { PhoneNumberInput } from "@/components/PhoneNumberInput";
+import { Globe } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState("profile");
+
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab && ["profile", "security", "notifications", "feature-flags", "student-id"].includes(tab)) {
+      setActiveTab(tab);
+    }
+  }, [searchParams]);
+
+  const isActualAdmin = ["super_admin", "admin"].includes(user?.role || "");
+  const studentIdConfigQuery = trpc.admin.getStudentIdConfig.useQuery(undefined, {
+    enabled: isActualAdmin,
+  });
+
+  const [prefix, setPrefix] = useState("STU");
+  const [startingNumber, setStartingNumber] = useState(1);
+  const [numberLength, setNumberLength] = useState(4);
+
+  useEffect(() => {
+    if (studentIdConfigQuery.data) {
+      setPrefix(studentIdConfigQuery.data.prefix || "STU");
+      setStartingNumber(studentIdConfigQuery.data.startingNumber || 1);
+      setNumberLength(studentIdConfigQuery.data.numberLength || 4);
+    }
+  }, [studentIdConfigQuery.data]);
+
+  const updateStudentIdConfigMutation = trpc.admin.updateStudentIdConfig.useMutation({
+    onSuccess: () => {
+      toast.success("Student ID configuration updated successfully");
+      studentIdConfigQuery.refetch();
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to update configuration");
+    },
+  });
+
+  const handleStudentIdConfigSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    updateStudentIdConfigMutation.mutate({
+      prefix,
+      startingNumber,
+      numberLength,
+    });
+  };
+
   const isAdmin = ["super_admin", "admin", "academic_head"].includes(user?.role || "");
   const isStudent = user?.role === "student";
 
@@ -22,13 +71,29 @@ export default function SettingsPage() {
   // Profile Form States
   const [profileName, setProfileName] = useState("");
   const [profileCountryCode, setProfileCountryCode] = useState("+91");
+  const [profileCountryISO, setProfileCountryISO] = useState("IN");
   const [profilePhoneNumber, setProfilePhoneNumber] = useState("");
   const [profileUsername, setProfileUsername] = useState("");
+
+  // Default country query (for admin only)
+  const defaultCountryQuery = trpc.admin.getDefaultCountry.useQuery(undefined, {
+    enabled: isAdmin,
+  });
+  const [defaultCountryCode, setDefaultCountryCode] = useState("+91");
+  const [defaultCountryISO, setDefaultCountryISO] = useState("IN");
+
+  useEffect(() => {
+    if (defaultCountryQuery.data) {
+      setDefaultCountryCode(defaultCountryQuery.data.code);
+      setDefaultCountryISO(defaultCountryQuery.data.iso);
+    }
+  }, [defaultCountryQuery.data]);
 
   useEffect(() => {
     if (profile) {
       setProfileName(profile.name || "");
       setProfileCountryCode(profile.countryCode || "+91");
+      setProfileCountryISO((profile as any).countryISO || "IN");
       setProfilePhoneNumber(profile.phoneNumber || "");
       setProfileUsername(profile.username || "");
     }
@@ -95,6 +160,16 @@ export default function SettingsPage() {
     },
   });
 
+  const updateDefaultCountryMutation = trpc.admin.updateDefaultCountry.useMutation({
+    onSuccess: () => {
+      toast.success("Default country updated");
+      defaultCountryQuery.refetch();
+    },
+    onError: (err) => {
+      toast.error(err.message || "Failed to update default country");
+    },
+  });
+
   // Handlers
   const handleProfileSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,7 +181,7 @@ export default function SettingsPage() {
       toast.error("Username is required");
       return;
     }
-    const error = validatePhoneNumber(profileCountryCode, profilePhoneNumber);
+    const error = validatePhoneNumber(profileCountryCode, profilePhoneNumber, profileCountryISO);
     if (error) {
       toast.error(error);
       return;
@@ -116,6 +191,7 @@ export default function SettingsPage() {
       name: profileName,
       username: profileUsername,
       countryCode: profileCountryCode,
+      countryISO: profileCountryISO,
       phoneNumber: profilePhoneNumber,
     });
   };
@@ -168,8 +244,8 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-2xl space-y-6">
-      <Tabs defaultValue="profile" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-3 lg:grid-cols-4 h-10 p-1 bg-gray-100 dark:bg-gray-900 rounded-lg">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+        <TabsList className={`grid w-full h-10 p-1 bg-gray-100 dark:bg-gray-900 rounded-lg ${isActualAdmin ? 'grid-cols-4 lg:grid-cols-5' : 'grid-cols-3 lg:grid-cols-4'}`}>
           <TabsTrigger value="profile" className="text-xs font-semibold flex items-center justify-center gap-1.5 py-1.5 rounded-md data-[state=active]:bg-white dark:data-[state=active]:bg-gray-950">
             <User className="w-3.5 h-3.5" />
             {tabLabel}
@@ -182,6 +258,12 @@ export default function SettingsPage() {
             <Bell className="w-3.5 h-3.5" />
             Notifications
           </TabsTrigger>
+          {isActualAdmin && (
+            <TabsTrigger value="student-id" className="text-xs font-semibold flex items-center justify-center gap-1.5 py-1.5 rounded-md data-[state=active]:bg-white dark:data-[state=active]:bg-gray-950">
+              <Settings className="w-3.5 h-3.5" />
+              System Settings
+            </TabsTrigger>
+          )}
           {isAdmin && user?.role !== "academic_head" && (
             <TabsTrigger value="feature-flags" className="hidden lg:flex text-xs font-semibold items-center justify-center gap-1.5 py-1.5 rounded-md data-[state=active]:bg-white dark:data-[state=active]:bg-gray-950">
               <Zap className="w-3.5 h-3.5" />
@@ -213,34 +295,18 @@ export default function SettingsPage() {
                       onChange={(e) => setProfileName(e.target.value)}
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="profile-phone">Phone Number</Label>
-                    <div className="flex gap-2">
-                      <select
-                        className="border rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-950 border-gray-200 dark:border-gray-800"
-                        value={profileCountryCode}
-                        onChange={(e) => setProfileCountryCode(e.target.value)}
-                      >
-                        {COUNTRY_CODES.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.code} ({c.country})
-                          </option>
-                        ))}
-                      </select>
-                      <Input
-                        id="profile-phone"
-                        className="flex-1"
-                        value={profilePhoneNumber}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (/^\d*$/.test(val)) {
-                            setProfilePhoneNumber(val);
-                          }
-                        }}
-                        placeholder={`${COUNTRY_CODES.find((c) => c.code === profileCountryCode)?.length || 10} digits`}
-                      />
-                    </div>
-                  </div>
+                  <PhoneNumberInput
+                    id="profile-phone"
+                    label="Phone Number"
+                    countryCode={profileCountryCode}
+                    countryISO={profileCountryISO}
+                    value={profilePhoneNumber}
+                    onChange={(data) => {
+                      setProfileCountryCode(data.countryCode);
+                      setProfileCountryISO(data.countryISO);
+                      setProfilePhoneNumber(data.phoneNumber);
+                    }}
+                  />
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -475,6 +541,116 @@ export default function SettingsPage() {
                     {aiInsightsFlag === "true" ? "Enabled" : "Disabled"}
                   </Badge>
                 </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
+
+        {isActualAdmin && (
+          <TabsContent value="student-id">
+            <form onSubmit={handleStudentIdConfigSubmit}>
+              <Card className="border border-gray-100 dark:border-gray-900 shadow-sm rounded-xl">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-gray-800 dark:text-gray-200">
+                    <Shield className="w-5 h-5 text-emerald-600" />
+                    Student ID Configuration
+                  </CardTitle>
+                  <CardDescription>
+                    Configure the auto-generation settings for student enrollment IDs.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="id-prefix">Prefix</Label>
+                      <Input
+                        id="id-prefix"
+                        value={prefix}
+                        onChange={(e) => setPrefix(e.target.value.toUpperCase())}
+                        placeholder="STU"
+                        maxLength={10}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="id-start">Starting Number</Label>
+                      <Input
+                        id="id-start"
+                        type="number"
+                        min={1}
+                        value={startingNumber}
+                        onChange={(e) => setStartingNumber(parseInt(e.target.value) || 1)}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="id-length">Padding Length</Label>
+                      <Input
+                        id="id-length"
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={numberLength}
+                        onChange={(e) => setNumberLength(parseInt(e.target.value) || 4)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-100 dark:border-gray-800">
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-1">
+                      ID Format Preview
+                    </span>
+                    <span className="text-xl font-mono font-bold text-emerald-600">
+                      {prefix}
+                      {String(startingNumber).padStart(numberLength, "0")}
+                    </span>
+                  </div>
+
+                  <Button
+                    type="submit"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
+                    disabled={updateStudentIdConfigMutation.isPending}
+                  >
+                    {updateStudentIdConfigMutation.isPending ? "Saving..." : "Save Configuration"}
+                  </Button>
+                </CardContent>
+              </Card>
+            </form>
+
+            {/* Default Country Settings */}
+            <Card className="mt-6 border border-gray-100 dark:border-gray-900 shadow-sm rounded-xl">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-gray-800 dark:text-gray-200">
+                  <Globe className="w-5 h-5 text-emerald-600" />
+                  Default Country Settings
+                </CardTitle>
+                <CardDescription>
+                  Set the default country code pre-selected in all phone number fields across the platform.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <PhoneNumberInput
+                  label="Default Country"
+                  description="This will be the pre-selected country for all new phone number inputs on the platform."
+                  countryCode={defaultCountryCode}
+                  countryISO={defaultCountryISO}
+                  value=""
+                  placeholder="(country selector only)"
+                  onChange={(data) => {
+                    setDefaultCountryCode(data.countryCode);
+                    setDefaultCountryISO(data.countryISO);
+                  }}
+                />
+                <Button
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                  disabled={updateDefaultCountryMutation.isPending}
+                  onClick={() => {
+                    updateDefaultCountryMutation.mutate({ code: defaultCountryCode, iso: defaultCountryISO });
+                  }}
+                >
+                  {updateDefaultCountryMutation.isPending ? "Saving..." : "Save Default Country"}
+                </Button>
               </CardContent>
             </Card>
           </TabsContent>

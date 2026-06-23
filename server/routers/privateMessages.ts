@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, and, or, desc, isNull, inArray, sql } from "drizzle-orm";
 import { createRouter, authedQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { users, privateMessages, batches, batchEnrollments, privateMessageAuditLogs } from "@db/schema";
+import { users, privateMessages, batches, batchEnrollments, privateMessageAuditLogs, profiles } from "@db/schema";
 import { sendNotification } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
 
@@ -238,6 +238,7 @@ export const privateMessageRouter = createRouter({
       const conversationsMap = new Map<
         string,
         {
+          id: string;
           otherUser: { id: number; name: string; role: string; avatar: string | null };
           sender: { id: number; name: string; role: string; avatar: string | null };
           receiver: { id: number; name: string; role: string; avatar: string | null };
@@ -254,6 +255,7 @@ export const privateMessageRouter = createRouter({
 
         if (!conversationsMap.has(key)) {
           conversationsMap.set(key, {
+            id: key,
             otherUser: {
               id: msg.receiverId,
               name: `${msg.sender.name} ↔ ${msg.receiver.name}`,
@@ -298,7 +300,10 @@ export const privateMessageRouter = createRouter({
     const conversationsMap = new Map<
       number,
       {
+        id: string;
         otherUser: { id: number; name: string; role: string; avatar: string | null };
+        sender: { id: number; name: string; role: string; avatar: string | null } | null;
+        receiver: { id: number; name: string; role: string; avatar: string | null } | null;
         lastMessage: string;
         lastMessageType: string;
         lastMessageTime: Date;
@@ -316,12 +321,15 @@ export const privateMessageRouter = createRouter({
 
       if (!existing) {
         conversationsMap.set(otherUser.id, {
+          id: [userId, otherUser.id].sort((a, b) => a - b).join("-"),
           otherUser: {
             id: otherUser.id,
             name: otherUser.name,
             role: otherUser.role,
             avatar: otherUser.avatar,
           },
+          sender: null as any,
+          receiver: null as any,
           lastMessage: msg.content,
           lastMessageType: msg.type,
           lastMessageTime: msg.createdAt,
@@ -348,7 +356,7 @@ export const privateMessageRouter = createRouter({
       let allowedUsers: any[] = [];
 
       const searchFilter = input?.search
-        ? sql`${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.username} ILIKE ${"%" + input.search + "%"}`
+        ? sql`(${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.username} ILIKE ${"%" + input.search + "%"} OR ${users.unionId} ILIKE ${"%" + input.search + "%"} OR EXISTS (SELECT 1 FROM profiles WHERE profiles.user_id = ${users.id} AND profiles.enrollment_id ILIKE ${"%" + input.search + "%"}))`
         : undefined;
 
       if (user.role === "super_admin") {
@@ -359,6 +367,7 @@ export const privateMessageRouter = createRouter({
         allowedUsers = await db.query.users.findMany({
           where: and(...filters),
           orderBy: desc(users.name),
+          with: { profile: true },
         });
       } else if (["admin", "academic_head"].includes(user.role)) {
         // Admins can message any student
@@ -368,6 +377,7 @@ export const privateMessageRouter = createRouter({
         allowedUsers = await db.query.users.findMany({
           where: and(...filters),
           orderBy: desc(users.name),
+          with: { profile: true },
         });
       } else if (user.role === "teacher") {
         // Teachers can message students enrolled in their batches
@@ -388,6 +398,7 @@ export const privateMessageRouter = createRouter({
               .select({ studentId: batchEnrollments.studentId })
               .from(batchEnrollments)
               .innerJoin(users, eq(batchEnrollments.studentId, users.id))
+              .leftJoin(profiles, eq(users.id, profiles.userId))
               .where(and(...filters, searchFilter));
             
             const ids = studentIds.map(s => s.studentId);
@@ -395,12 +406,13 @@ export const privateMessageRouter = createRouter({
               allowedUsers = await db.query.users.findMany({
                 where: inArray(users.id, ids),
                 orderBy: desc(users.name),
+                with: { profile: true },
               });
             }
           } else {
             const enrollments = await db.query.batchEnrollments.findMany({
               where: and(...filters),
-              with: { student: true },
+              with: { student: { with: { profile: true } } },
             });
             // Deduplicate
             const unique = new Map<number, any>();
@@ -437,6 +449,7 @@ export const privateMessageRouter = createRouter({
         allowedUsers = await db.query.users.findMany({
           where: and(...filters),
           orderBy: desc(users.name),
+          with: { profile: true },
         });
       }
 
@@ -445,6 +458,9 @@ export const privateMessageRouter = createRouter({
         name: u.name,
         role: u.role,
         avatar: u.avatar,
+        unionId: u.unionId,
+        enrollmentId: u.profile?.enrollmentId || null,
+        profile: u.profile || null,
       }));
     }),
   deleteMessage: authedQuery

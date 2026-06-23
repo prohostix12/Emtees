@@ -8,9 +8,10 @@ import { sendNotification, sendBulkNotification, getAdminUserIds } from "../lib/
 import { getNextUniqueId } from "../lib/idGenerator";
 import { env } from "../lib/env";
 import { isStudentFeeRestricted } from "../lib/feeHelper";
-import { phoneSchema, parseFullPhone, validatePhoneNumber, PHONE_ERROR_MESSAGE } from "@contracts/validation";
+import { phoneSchema, parseFullPhone, validatePhoneNumber, PHONE_ERROR_MESSAGE, getCountryISOFromDialCode } from "@contracts/validation";
 import { sendUserCredentialsEmail } from "../lib/email";
 import bcrypt from "bcryptjs";
+import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
 
 
 export const userRouter = createRouter({
@@ -27,7 +28,14 @@ export const userRouter = createRouter({
     .query(async ({ input }) => {
       const db = getDb();
       const filters = [];
-      if (input?.role && input.role !== "all") filters.push(eq(users.role, input.role));
+      if (input?.role && input.role !== "all") {
+        if ((input.role as string) === "sales_executive") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Sales executives must be managed through Sales Executive Module." });
+        }
+        filters.push(eq(users.role, input.role));
+      } else if (input?.role === "all" || !input?.role) {
+        filters.push(and(ne(users.role, "student"), ne(users.role, "sales_executive")));
+      }
       if (input?.status && input.status !== "all") filters.push(eq(users.status, input.status));
       if (input?.search) {
         filters.push(
@@ -63,6 +71,7 @@ export const userRouter = createRouter({
       z.object({
         name: z.string().min(2),
         countryCode: z.string().optional(),
+        countryISO: z.string().optional(),
         phoneNumber: z.string().optional(),
         phone: z.string().optional(),
         email: z.string().email().optional(),
@@ -85,6 +94,7 @@ export const userRouter = createRouter({
             dueDate: z.string().optional(),
           })
         ).optional(),
+        enrollmentId: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -95,10 +105,13 @@ export const userRouter = createRouter({
         });
       }
 
+
+
       const db = getDb();
 
       let countryCode = input.countryCode;
       let phoneNumber = input.phoneNumber;
+      let countryISO = input.countryISO;
 
       if (!countryCode || !phoneNumber) {
         if (input.phone) {
@@ -106,6 +119,7 @@ export const userRouter = createRouter({
           if (parsed) {
             countryCode = parsed.countryCode;
             phoneNumber = parsed.phoneNumber;
+            countryISO = parsed.countryISO;
           } else {
             throw new TRPCError({ code: "BAD_REQUEST", message: PHONE_ERROR_MESSAGE });
           }
@@ -114,22 +128,24 @@ export const userRouter = createRouter({
         }
       }
 
-      const valError = validatePhoneNumber(countryCode, phoneNumber);
+      if (!countryISO) {
+        countryISO = getCountryISOFromDialCode(countryCode) || "IN";
+      }
+
+      const valError = validatePhoneNumber(countryCode, phoneNumber, countryISO);
       if (valError) {
         throw new TRPCError({ code: "BAD_REQUEST", message: valError });
       }
 
+      const fullIntNum = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
       const existingPhone = await db.query.users.findFirst({
-        where: and(
-          eq(users.countryCode, countryCode),
-          eq(users.phoneNumber, phoneNumber)
-        ),
+        where: eq(users.fullInternationalNumber, fullIntNum),
       });
       if (existingPhone) {
         throw new TRPCError({ code: "CONFLICT", message: "Phone already registered" });
       }
 
-      const formattedPhone = `${countryCode} ${phoneNumber}`;
+      const formattedPhone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
 
       // Validate student course & batch selection
       if (input.role === "student") {
@@ -167,6 +183,29 @@ export const userRouter = createRouter({
       if (existingUsername) {
         throw new TRPCError({ code: "CONFLICT", message: "Username already exists" });
       }
+
+      let finalEnrollmentId: string | undefined = undefined;
+      if (input.role === "student") {
+        if (input.enrollmentId && input.enrollmentId.trim() !== "") {
+          const trimmedId = input.enrollmentId.trim();
+          const existingProfile = await db.query.profiles.findFirst({
+            where: eq(profiles.enrollmentId, trimmedId),
+          });
+          if (existingProfile) {
+            throw new TRPCError({ code: "CONFLICT", message: `Enrollment ID "${trimmedId}" is already taken.` });
+          }
+          const existingUser = await db.query.users.findFirst({
+            where: and(eq(users.unionId, trimmedId), eq(users.role, "student")),
+          });
+          if (existingUser) {
+            throw new TRPCError({ code: "CONFLICT", message: `Enrollment ID "${trimmedId}" conflicts with an existing Student ID.` });
+          }
+          finalEnrollmentId = trimmedId;
+        } else {
+          finalEnrollmentId = await generateNextEnrollmentId();
+        }
+      }
+
       const hashedPassword = await bcrypt.hash(input.password, 10);
 
       const uniqueId = await getNextUniqueId(input.role);
@@ -176,7 +215,9 @@ export const userRouter = createRouter({
         name: input.name,
         phone: formattedPhone,
         countryCode,
+        countryISO,
         phoneNumber,
+        fullInternationalNumber: fullIntNum,
         email: input.email,
         username: input.username,
         password: hashedPassword,
@@ -215,6 +256,7 @@ export const userRouter = createRouter({
 
         await db.insert(profiles).values({
           userId,
+          enrollmentId: finalEnrollmentId,
           course: course?.name || "",
           batch: batch?.name || "",
           batchTime: batch?.timeSlot || "",
@@ -288,6 +330,7 @@ export const userRouter = createRouter({
         // Fallback for legacy creation or non-student profiles
         await db.insert(profiles).values({
           userId,
+          enrollmentId: input.role === "student" ? finalEnrollmentId : undefined,
           course: input.course,
           batch: input.batch,
           feesTotal: String(input.feesTotal || 0),
@@ -334,6 +377,7 @@ export const userRouter = createRouter({
         id: z.number(),
         name: z.string().optional(),
         countryCode: z.string().optional(),
+        countryISO: z.string().optional(),
         phoneNumber: z.string().optional(),
         phone: phoneSchema.optional(),
         email: z.string().email().optional(),
@@ -343,6 +387,7 @@ export const userRouter = createRouter({
         feesTotal: z.number().optional(),
         completionDate: z.date().optional(),
         canViewSalaryReports: z.boolean().optional(),
+        enrollmentId: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -354,7 +399,15 @@ export const userRouter = createRouter({
       }
 
       const db = getDb();
-      const { id, course, batch, feesTotal, completionDate, canViewSalaryReports, ...userData } = input;
+      const currentUser = await db.query.users.findFirst({
+        where: eq(users.id, input.id),
+      });
+      if (!currentUser) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+      }
+
+
+      const { id, course, batch, feesTotal, completionDate, canViewSalaryReports, enrollmentId, ...userData } = input;
 
       const updateData: any = { ...userData };
       if (ctx.user.role === "super_admin" && canViewSalaryReports !== undefined) {
@@ -363,37 +416,38 @@ export const userRouter = createRouter({
 
       let countryCode = input.countryCode;
       let phoneNumber = input.phoneNumber;
+      let countryISO = input.countryISO;
 
       if (countryCode || phoneNumber || input.phone) {
-        const currentUser = await db.query.users.findFirst({
-          where: eq(users.id, id),
-        });
-        if (!currentUser) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
-        }
 
         if (input.phone && !countryCode && !phoneNumber) {
           const parsed = parseFullPhone(input.phone);
           if (parsed) {
             countryCode = parsed.countryCode;
             phoneNumber = parsed.phoneNumber;
+            countryISO = parsed.countryISO;
           } else {
             throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid phone number." });
           }
         } else {
           countryCode = countryCode ?? currentUser.countryCode ?? "";
           phoneNumber = phoneNumber ?? currentUser.phoneNumber ?? "";
+          countryISO = countryISO ?? currentUser.countryISO ?? "";
         }
 
-        const valError = validatePhoneNumber(countryCode, phoneNumber);
+        if (!countryISO) {
+          countryISO = getCountryISOFromDialCode(countryCode) || "IN";
+        }
+
+        const valError = validatePhoneNumber(countryCode, phoneNumber, countryISO);
         if (valError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: valError });
         }
 
+        const fullIntNum = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
         const existingPhone = await db.query.users.findFirst({
           where: and(
-            eq(users.countryCode, countryCode),
-            eq(users.phoneNumber, phoneNumber),
+            eq(users.fullInternationalNumber, fullIntNum),
             ne(users.id, id)
           ),
         });
@@ -403,13 +457,40 @@ export const userRouter = createRouter({
 
         delete updateData.phone;
         updateData.countryCode = countryCode;
+        updateData.countryISO = countryISO;
         updateData.phoneNumber = phoneNumber;
-        updateData.phone = `${countryCode} ${phoneNumber}`;
+        updateData.fullInternationalNumber = fullIntNum;
+        updateData.phone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
       }
 
       await db.update(users).set(updateData).where(eq(users.id, id));
 
-      if (course !== undefined || batch !== undefined || feesTotal !== undefined || completionDate !== undefined) {
+      let profileEnrollmentId: string | undefined = undefined;
+      if (enrollmentId !== undefined && currentUser.role === "student") {
+        const trimmedId = enrollmentId?.trim() || "";
+        if (trimmedId !== "") {
+          const existingEnrollmentId = await db.query.profiles.findFirst({
+            where: and(
+              eq(profiles.enrollmentId, trimmedId),
+              ne(profiles.userId, id)
+            ),
+          });
+          if (existingEnrollmentId) {
+            throw new TRPCError({ code: "CONFLICT", message: `Enrollment ID "${trimmedId}" is already taken.` });
+          }
+          const existingUser = await db.query.users.findFirst({
+            where: and(eq(users.unionId, trimmedId), eq(users.role, "student"), ne(users.id, id)),
+          });
+          if (existingUser) {
+            throw new TRPCError({ code: "CONFLICT", message: `Enrollment ID "${trimmedId}" conflicts with an existing Student ID.` });
+          }
+          profileEnrollmentId = trimmedId;
+        } else {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Enrollment ID cannot be empty." });
+        }
+      }
+
+      if (course !== undefined || batch !== undefined || feesTotal !== undefined || completionDate !== undefined || profileEnrollmentId !== undefined) {
         const existingProfile = await db.query.profiles.findFirst({
           where: eq(profiles.userId, id),
         });
@@ -426,6 +507,7 @@ export const userRouter = createRouter({
               feesTotal: feesTotal !== undefined ? String(feesTotal) : undefined,
               feesBalance,
               completionDate,
+              enrollmentId: profileEnrollmentId,
             })
             .where(eq(profiles.userId, id));
         } else {
@@ -436,6 +518,7 @@ export const userRouter = createRouter({
             feesTotal: String(feesTotal || 0),
             feesBalance: String(feesTotal || 0),
             completionDate,
+            enrollmentId: profileEnrollmentId,
           });
         }
 
@@ -500,6 +583,8 @@ export const userRouter = createRouter({
           message: "User not found",
         });
       }
+
+
 
       if (targetUser.role === "super_admin" && ctx.user.role !== "super_admin") {
         throw new TRPCError({
@@ -582,9 +667,20 @@ export const userRouter = createRouter({
       .from(classes)
       .where(eq(classes.teacherId, ctx.user.id));
 
+    // 3. Current month's earnings
+    const currentMonth = new Date().toISOString().substring(0, 7);
+    const currentSalary = await db.query.teacherSalaries.findFirst({
+      where: and(
+        eq(teacherSalaries.teacherId, ctx.user.id),
+        eq(teacherSalaries.month, currentMonth)
+      )
+    });
+    const currentMonthEarnings = currentSalary ? parseFloat(currentSalary.totalAmount || "0") : 0;
+
     return {
       classesCount,
       studentCount,
+      currentMonthEarnings,
     };
   }),
 
@@ -632,6 +728,7 @@ export const userRouter = createRouter({
       batch: z.string().optional(),
       feesTotal: z.number().optional(),
       userId: z.string().optional(),
+      enrollmentId: z.string().optional(),
     })))
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "super_admin" && ctx.user.role !== "admin") {
@@ -648,34 +745,99 @@ export const userRouter = createRouter({
         if (!parsed) {
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: `Invalid phone number format: ${s.phone}`,
+            message: `Invalid phone number format for student ${s.name}: ${s.phone}`,
           });
         }
-        const { countryCode, phoneNumber } = parsed;
+        const { countryCode, phoneNumber, countryISO } = parsed;
+        const valError = validatePhoneNumber(countryCode, phoneNumber, countryISO);
+        if (valError) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Validation failed for student ${s.name} (${s.phone}): ${valError}`,
+          });
+        }
+
+        const fullIntNum = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
+        const existingPhone = await db.query.users.findFirst({
+          where: eq(users.fullInternationalNumber, fullIntNum),
+        });
+        if (existingPhone) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: `Phone number ${s.phone} is already registered.`,
+          });
+        }
+
         const hashedPassword = await bcrypt.hash(phoneNumber.slice(-6), 10);
+        
+        let finalEnrollmentId = s.enrollmentId || s.userId;
         let uniqueId: string;
+
         if (s.userId) {
           const prefix = env.studentIdPrefix || "STU";
-          const regex = new RegExp(`^${prefix}\\d{4}$`);
+          const regex = new RegExp(`^${prefix}\\d{3,8}$`);
           if (!regex.test(s.userId)) {
             throw new TRPCError({
               code: "BAD_REQUEST",
               message: `Invalid User ID "${s.userId}". User ID must match the sequence format (e.g. ${prefix}0001). Custom User IDs are not allowed.`,
             });
           }
+          const existingProfile = await db.query.profiles.findFirst({
+            where: eq(profiles.enrollmentId, s.userId),
+          });
+          if (existingProfile) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `Enrollment ID "${s.userId}" is already taken.`,
+            });
+          }
+          const existingUserWithId = await db.query.users.findFirst({
+            where: and(eq(users.unionId, s.userId), eq(users.role, "student")),
+          });
+          if (existingUserWithId) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `Enrollment ID "${s.userId}" conflicts with an existing Student ID.`,
+            });
+          }
+          finalEnrollmentId = s.userId;
           uniqueId = s.userId;
+        } else if (s.enrollmentId) {
+          const existingProfile = await db.query.profiles.findFirst({
+            where: eq(profiles.enrollmentId, s.enrollmentId),
+          });
+          if (existingProfile) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `Enrollment ID "${s.enrollmentId}" is already taken.`,
+            });
+          }
+          const existingUserWithId = await db.query.users.findFirst({
+            where: and(eq(users.unionId, s.enrollmentId), eq(users.role, "student")),
+          });
+          if (existingUserWithId) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `Enrollment ID "${s.enrollmentId}" conflicts with an existing Student ID.`,
+            });
+          }
+          finalEnrollmentId = s.enrollmentId;
+          uniqueId = await getNextUniqueId("student");
         } else {
+          finalEnrollmentId = await generateNextEnrollmentId();
           uniqueId = await getNextUniqueId("student");
         }
         
-        const formattedPhone = `${countryCode} ${phoneNumber}`;
+        const formattedPhone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
         const tempPassword = phoneNumber.slice(-6);
         const result = await db.insert(users).values({
           unionId: uniqueId,
           name: s.name,
           phone: formattedPhone,
           countryCode,
+          countryISO,
           phoneNumber,
+          fullInternationalNumber: fullIntNum,
           email: s.email,
           username: formattedPhone,
           password: hashedPassword,
@@ -700,15 +862,14 @@ export const userRouter = createRouter({
           }
         }
 
-        if (s.course) {
-          await db.insert(profiles).values({
-            userId,
-            course: s.course,
-            batch: s.batch,
-            feesTotal: String(s.feesTotal || 0),
-            feesBalance: String(s.feesTotal || 0),
-          });
-        }
+        await db.insert(profiles).values({
+          userId,
+          enrollmentId: finalEnrollmentId,
+          course: s.course || "",
+          batch: s.batch || "",
+          feesTotal: String(s.feesTotal || 0),
+          feesBalance: String(s.feesTotal || 0),
+        });
         results.push(userId);
       }
       return { imported: results.length };
@@ -720,6 +881,7 @@ export const userRouter = createRouter({
         name: z.string().min(2),
         username: z.string().min(3),
         countryCode: z.string().optional(),
+        countryISO: z.string().optional(),
         phoneNumber: z.string().optional(),
         phone: z.string().optional(),
       })
@@ -755,6 +917,7 @@ export const userRouter = createRouter({
 
       let countryCode = input.countryCode;
       let phoneNumber = input.phoneNumber;
+      let countryISO = input.countryISO;
 
       if (!countryCode || !phoneNumber) {
         if (input.phone) {
@@ -762,6 +925,7 @@ export const userRouter = createRouter({
           if (parsed) {
             countryCode = parsed.countryCode;
             phoneNumber = parsed.phoneNumber;
+            countryISO = parsed.countryISO;
           } else {
             throw new TRPCError({ code: "BAD_REQUEST", message: PHONE_ERROR_MESSAGE });
           }
@@ -770,15 +934,19 @@ export const userRouter = createRouter({
         }
       }
 
-      const valError = validatePhoneNumber(countryCode, phoneNumber);
+      if (!countryISO) {
+        countryISO = getCountryISOFromDialCode(countryCode) || "IN";
+      }
+
+      const valError = validatePhoneNumber(countryCode, phoneNumber, countryISO);
       if (valError) {
         throw new TRPCError({ code: "BAD_REQUEST", message: valError });
       }
 
+      const fullIntNum = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
       const existingPhone = await db.query.users.findFirst({
         where: and(
-          eq(users.countryCode, countryCode),
-          eq(users.phoneNumber, phoneNumber),
+          eq(users.fullInternationalNumber, fullIntNum),
           ne(users.id, userId)
         ),
       });
@@ -786,7 +954,7 @@ export const userRouter = createRouter({
         throw new TRPCError({ code: "CONFLICT", message: "Phone already registered" });
       }
 
-      const formattedPhone = `${countryCode} ${phoneNumber}`;
+      const formattedPhone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
 
       // 2. Update the user
       await db.update(users)
@@ -795,7 +963,9 @@ export const userRouter = createRouter({
           username: input.username,
           phone: formattedPhone,
           countryCode,
+          countryISO,
           phoneNumber,
+          fullInternationalNumber: fullIntNum,
         })
         .where(eq(users.id, userId));
 

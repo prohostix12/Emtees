@@ -266,8 +266,8 @@ export default function PrivateChatPage() {
   const contactsQuery = trpc.privateMessage.listAvailableContacts.useQuery({ search: searchContact || undefined });
   const messagesQuery = trpc.privateMessage.getConversation.useQuery(
     {
-      otherUserId: user?.role === "academic_head" ? (selectedUser?.receiverId ?? 0) : (selectedUser?.id ?? 0),
-      senderId: user?.role === "academic_head" ? selectedUser?.senderId : undefined,
+      otherUserId: selectedUser?.senderId !== undefined ? (selectedUser.receiverId ?? 0) : (selectedUser?.id ?? 0),
+      senderId: selectedUser?.senderId,
     },
     { enabled: !!selectedUser }
   );
@@ -302,21 +302,52 @@ export default function PrivateChatPage() {
     onError: (err) => toast.error(err.message),
   });
 
+  const selectedConversationId = selectedUser
+    ? (selectedUser.senderId !== undefined
+      ? [selectedUser.senderId, selectedUser.receiverId].sort((a: any, b: any) => a - b).join("-")
+      : [user?.id, selectedUser.id].sort((a: any, b: any) => a - b).join("-"))
+    : null;
+
   const conversations = conversationsQuery.data || [];
-  const displayConversations = [...conversations];
-  if (selectedUser && !conversations.some((c) => c.otherUser.id === selectedUser.id)) {
-    displayConversations.unshift({
-      otherUser: {
-        id: selectedUser.id,
-        name: selectedUser.name,
-        role: selectedUser.role,
-        avatar: selectedUser.avatar ?? null,
-      },
-      lastMessage: "No messages yet",
-      lastMessageType: "text",
-      lastMessageTime: new Date(),
-      unreadCount: 0,
-    });
+  const displayConversations: typeof conversations = [];
+  const seenIds = new Set<string>();
+
+  // Add the placeholder first if it doesn't exist in conversations
+  if (selectedUser) {
+    const isMonitored = selectedUser.senderId !== undefined;
+    const expectedId = isMonitored
+      ? [selectedUser.senderId, selectedUser.receiverId].sort((a: any, b: any) => a - b).join("-")
+      : [user?.id, selectedUser.id].sort((a: any, b: any) => a - b).join("-");
+
+    const exists = conversations.some((c) => c.id === expectedId);
+    if (!exists) {
+      displayConversations.push({
+        id: expectedId,
+        otherUser: {
+          id: selectedUser.id,
+          name: selectedUser.name,
+          role: selectedUser.role,
+          avatar: selectedUser.avatar ?? null,
+        },
+        sender: isMonitored ? { id: selectedUser.senderId!, name: "", role: "", avatar: null } : null,
+        receiver: isMonitored ? { id: selectedUser.receiverId!, name: "", role: "", avatar: null } : null,
+        lastMessage: "No messages yet",
+        lastMessageType: "text",
+        lastMessageTime: new Date(),
+        unreadCount: 0,
+      });
+      seenIds.add(expectedId);
+    }
+  }
+
+  // Add the rest of the conversations, ensuring uniqueness
+  for (const conv of conversations) {
+    if (!seenIds.has(conv.id)) {
+      displayConversations.push(conv);
+      seenIds.add(conv.id);
+    } else {
+      console.warn(`Duplicate conversation detected and filtered: ID=${conv.id}, name=${conv.otherUser.name}`);
+    }
   }
 
   // Scroll Helpers
@@ -368,22 +399,31 @@ export default function PrivateChatPage() {
       conversationsQuery.refetch();
 
       // If payload is from or to the currently opened user conversation
-      if (selectedUser && (payload.senderId === selectedUser.id || payload.receiverId === selectedUser.id)) {
-        messagesQuery.refetch();
-        setTimeout(() => scrollToBottom("smooth"), 100);
+      if (selectedUser) {
+        const isMonitored = selectedUser.senderId !== undefined;
+        const matches = isMonitored
+          ? (payload.senderId === selectedUser.senderId && payload.receiverId === selectedUser.receiverId) ||
+            (payload.senderId === selectedUser.receiverId && payload.receiverId === selectedUser.senderId)
+          : (payload.senderId === selectedUser.id && payload.receiverId === user?.id) ||
+            (payload.senderId === user?.id && payload.receiverId === selectedUser.id);
+
+        if (matches) {
+          messagesQuery.refetch();
+          setTimeout(() => scrollToBottom("smooth"), 100);
+        }
       }
     }
 
-    function onPrivateMessageDelete(_payload: any) {
+    function onPrivateMessageDelete(payload: any) {
       conversationsQuery.refetch();
-      if (selectedUser) {
+      if (selectedUser && messagesQuery.data?.some((m) => m.id === payload.messageId)) {
         messagesQuery.refetch();
       }
     }
 
-    function onPrivateMessageEdit(_payload: any) {
+    function onPrivateMessageEdit(payload: any) {
       conversationsQuery.refetch();
-      if (selectedUser) {
+      if (selectedUser && messagesQuery.data?.some((m) => m.id === payload.messageId)) {
         messagesQuery.refetch();
       }
     }
@@ -396,7 +436,7 @@ export default function PrivateChatPage() {
       socket.off("private_message:delete", onPrivateMessageDelete);
       socket.off("private_message:edit", onPrivateMessageEdit);
     };
-  }, [selectedUser, conversationsQuery, messagesQuery, scrollToBottom]);
+  }, [selectedUser, user, conversationsQuery, messagesQuery, scrollToBottom]);
 
   // Voice recording helpers
   const stopTimer = () => {
@@ -559,9 +599,22 @@ export default function PrivateChatPage() {
   };
 
   const startChatWith = (contact: any) => {
-    const existing = conversations.find((c) => c.otherUser.id === contact.id);
+    const isMonitoringRole = ["super_admin", "academic_head"].includes(user?.role || "");
+    const existing = conversations.find((c) => {
+      if (isMonitoringRole) {
+        return (c.sender?.id === user?.id && c.receiver?.id === contact.id) ||
+               (c.sender?.id === contact.id && c.receiver?.id === user?.id);
+      } else {
+        return c.otherUser.id === contact.id;
+      }
+    });
+
     if (existing) {
-      setSelectedUser(existing.otherUser);
+      setSelectedUser({
+        ...existing.otherUser,
+        senderId: existing.sender?.id,
+        receiverId: existing.receiver?.id,
+      });
     } else {
       setSelectedUser(contact);
     }
@@ -614,7 +667,7 @@ export default function PrivateChatPage() {
           )}
           {displayConversations.map((conv) => (
             <button
-              key={conv.otherUser.id}
+              key={conv.id}
               onClick={() =>
                 setSelectedUser({
                   ...conv.otherUser,
@@ -623,7 +676,7 @@ export default function PrivateChatPage() {
                 })
               }
               className={`w-full text-left px-4 py-3.5 border-b hover:bg-gray-50 transition-colors flex items-center gap-3 relative ${
-                selectedUser?.id === conv.otherUser.id ? "bg-emerald-50/50" : ""
+                selectedConversationId === conv.id ? "bg-emerald-50/50" : ""
               }`}
             >
               <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center font-bold text-emerald-700 uppercase shrink-0">

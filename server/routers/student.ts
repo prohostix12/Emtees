@@ -7,6 +7,7 @@ import { getDb } from "../queries/connection";
 import { env } from "../lib/env";
 import { flexibilityRequests, feedback, notifications, payments, profiles, users, batchEnrollments, batches, classes, oneToOneSessions, systemSettings, classBatches } from "@db/schema";
 import { sendNotification, sendBulkNotification } from "../lib/notificationEngine";
+import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
 
 export const studentRouter = createRouter({
   myPayments: authedQuery.query(async ({ ctx }) => {
@@ -849,8 +850,10 @@ export const studentRouter = createRouter({
             })
             .where(eq(profiles.userId, ctx.user.id));
         } else {
+          const nextEnrollmentId = await generateNextEnrollmentId();
           await db.insert(profiles).values({
             userId: ctx.user.id,
+            enrollmentId: nextEnrollmentId,
             batch: batch.name,
             batchTime: batch.timeSlot,
             course: batch.module?.name || null,

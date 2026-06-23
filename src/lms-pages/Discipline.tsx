@@ -108,7 +108,7 @@ export default function DisciplinePage() {
       if (student) {
         setCreateForm((prev) => ({
           ...prev,
-          unionId: student.unionId || "",
+          unionId: student.profile?.enrollmentId || student.unionId || "",
           batch: student.profile?.batch || "No Batch Assigned",
         }));
       }
@@ -199,7 +199,7 @@ export default function DisciplinePage() {
             <TableHeader className="bg-gray-50">
               <TableRow>
                 <TableHead className="font-bold text-gray-700">Student Name</TableHead>
-                <TableHead className="font-bold text-gray-700">User ID</TableHead>
+                <TableHead className="font-bold text-gray-700">Student ID</TableHead>
                 <TableHead className="font-bold text-gray-700">Batch</TableHead>
                 <TableHead className="font-bold text-gray-700">Level</TableHead>
                 <TableHead className="font-bold text-gray-700">Reason</TableHead>
@@ -213,7 +213,7 @@ export default function DisciplinePage() {
                 listQuery.data.map((record) => (
                   <TableRow key={record.id} className="hover:bg-gray-50/50">
                     <TableCell className="font-medium text-gray-900">{record.user.name}</TableCell>
-                    <TableCell className="text-xs text-gray-500 font-semibold">{record.user.unionId}</TableCell>
+                    <TableCell className="text-xs text-gray-500 font-semibold">{record.user.profile?.enrollmentId || record.user.unionId}</TableCell>
                     <TableCell className="text-xs text-gray-500">{record.batch || "N/A"}</TableCell>
                     <TableCell>
                       <Badge
@@ -323,7 +323,7 @@ export default function DisciplinePage() {
                 <option value="">Select Student</option>
                 {studentsQuery.data?.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.unionId})
+                    {s.name} ({s.profile?.enrollmentId || s.unionId})
                   </option>
                 ))}
               </select>
@@ -331,7 +331,7 @@ export default function DisciplinePage() {
             
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label className="text-xs font-bold text-gray-600 block mb-1">User ID</Label>
+                <Label className="text-xs font-bold text-gray-600 block mb-1">Student ID</Label>
                 <Input value={createForm.unionId} disabled className="rounded-xl bg-gray-50 text-gray-500 text-xs h-10" />
               </div>
               <div>
@@ -428,8 +428,8 @@ export default function DisciplinePage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs font-bold text-gray-600 block mb-1">User ID</Label>
-                  <Input value={editingRecord.user.unionId} disabled className="rounded-xl bg-gray-50 text-gray-500 text-xs h-10" />
+                  <Label className="text-xs font-bold text-gray-600 block mb-1">Student ID</Label>
+                  <Input value={editingRecord.user.profile?.enrollmentId || editingRecord.user.unionId} disabled className="rounded-xl bg-gray-50 text-gray-500 text-xs h-10" />
                 </div>
                 <div>
                   <Label className="text-xs font-bold text-gray-600 block mb-1">Batch *</Label>
@@ -562,8 +562,8 @@ export default function DisciplinePage() {
                   <p className="font-semibold text-gray-800 text-sm mt-0.5">{selectedRecord.user.name}</p>
                 </div>
                 <div>
-                  <span className="text-[10px] text-gray-400 font-bold uppercase">User ID</span>
-                  <p className="font-semibold text-gray-800 text-sm mt-0.5">{selectedRecord.user.unionId}</p>
+                  <span className="text-[10px] text-gray-400 font-bold uppercase">Student ID</span>
+                  <p className="font-semibold text-gray-800 text-sm mt-0.5">{selectedRecord.user.profile?.enrollmentId || selectedRecord.user.unionId}</p>
                 </div>
               </div>
 

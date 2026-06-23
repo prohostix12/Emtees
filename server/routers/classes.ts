@@ -1,15 +1,17 @@
 import { z } from "zod";
-import { eq, desc, and, inArray, or, ilike } from "drizzle-orm";
+import { eq, desc, and, inArray, or, ilike, sql, count } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { classes, attendance, oneToOneSessions, batchEnrollments, batches, profiles, users, classBatches, classJoinRequests, attendanceAlerts, oneToOneRescheduleRequests } from "@db/schema";
+import { classes, attendance, oneToOneSessions, batchEnrollments, batches, profiles, users, classBatches, classJoinRequests, attendanceAlerts, oneToOneRescheduleRequests, notifications } from "@db/schema";
 import { sendBulkNotification, sendNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
 import { isStudentFeeRestricted } from "../lib/feeHelper";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
 import { generateJitsiToken } from "../lib/jitsi";
+import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
+import { recalculateSalaryInternal } from "./admin";
 
 
 export const classRouter = createRouter({
@@ -17,9 +19,15 @@ export const classRouter = createRouter({
     .input(z.object({ batchId: z.number().optional(), status: z.string().optional() }).optional())
     .query(async ({ input, ctx }) => {
       const db = getDb();
+      const isRestricted = ctx.user.role === "student" ? await isStudentFeeRestricted(ctx.user.id) : false;
+
+      // ─── PART 1: QUERY GROUP CLASSES ───
       const filters = [];
       if (input?.status) filters.push(eq(classes.status, input.status as "scheduled" | "ongoing" | "completed" | "cancelled"));
       if (ctx.user.role === "teacher") filters.push(eq(classes.teacherId, ctx.user.id));
+
+      let visibleGroupBatchIds: number[] = [];
+      const isStudentQuery = ctx.user.role === "student";
 
       if (input?.batchId) {
         const cbList = await db.select({ classId: classBatches.classId }).from(classBatches).where(eq(classBatches.batchId, input.batchId));
@@ -30,7 +38,7 @@ export const classRouter = createRouter({
           batchConditions.push(inArray(classes.id, classIds));
         }
         filters.push(or(...batchConditions));
-      } else if (ctx.user.role === "student") {
+      } else if (isStudentQuery) {
         const studentEnrollments = await db.query.batchEnrollments.findMany({
           where: and(
             eq(batchEnrollments.studentId, ctx.user.id),
@@ -38,45 +46,189 @@ export const classRouter = createRouter({
           ),
           columns: { batchId: true },
         });
-        const batchIds = studentEnrollments.map((e) => e.batchId);
-        if (batchIds.length === 0) {
-          return [];
-        }
+        const enrolledBatchIds = studentEnrollments.map((e) => e.batchId);
 
-        const cbList = await db.select({ classId: classBatches.classId }).from(classBatches).where(inArray(classBatches.batchId, batchIds));
-        const classIds = cbList.map(x => x.classId);
+        // Fetch all active batches
+        const activeBatches = await db.query.batches.findMany({
+          where: eq(batches.status, "active"),
+          columns: { id: true },
+        });
+        const activeBatchIds = activeBatches.map((b) => b.id);
 
-        const studentConditions = [inArray(classes.batchId, batchIds)];
-        if (classIds.length > 0) {
-          studentConditions.push(inArray(classes.id, classIds));
-        }
-        filters.push(or(...studentConditions));
+        visibleGroupBatchIds = Array.from(new Set([...enrolledBatchIds, ...activeBatchIds]));
       }
 
-      const where = filters.length > 0 ? and(...filters) : undefined;
-      const list = await db.query.classes.findMany({
-        where,
-        orderBy: desc(classes.scheduledAt),
-        with: {
-          teacher: true,
-          batch: true,
-          classBatches: {
-            with: {
-              batch: true
+      let groupClassesList: any[] = [];
+      let fetchGroupClasses = true;
+
+      if (isStudentQuery && !input?.batchId && visibleGroupBatchIds.length === 0) {
+        fetchGroupClasses = false;
+      }
+
+      if (fetchGroupClasses) {
+        const groupFilters = [...filters];
+        if (isStudentQuery && !input?.batchId) {
+          const cbList = await db.select({ classId: classBatches.classId }).from(classBatches).where(inArray(classBatches.batchId, visibleGroupBatchIds));
+          const classIds = cbList.map(x => x.classId);
+
+          const studentConditions = [inArray(classes.batchId, visibleGroupBatchIds)];
+          if (classIds.length > 0) {
+            studentConditions.push(inArray(classes.id, classIds));
+          }
+          groupFilters.push(or(...studentConditions));
+        }
+
+        const where = groupFilters.length > 0 ? and(...groupFilters) : undefined;
+        groupClassesList = await db.query.classes.findMany({
+          where,
+          orderBy: desc(classes.scheduledAt),
+          with: {
+            teacher: true,
+            batch: true,
+            classBatches: {
+              with: {
+                batch: true
+              }
+            }
+          },
+        });
+      }
+
+      // ─── PART 2: QUERY ONE-TO-ONE SESSIONS ───
+      let oneToOnesList: any[] = [];
+
+      if (!input?.batchId) {
+        const oToFilters = [];
+        if (input?.status) {
+          if (input.status === "scheduled") {
+            oToFilters.push(or(eq(oneToOneSessions.status, "scheduled"), eq(oneToOneSessions.status, "rescheduled")));
+          } else {
+            oToFilters.push(eq(oneToOneSessions.status, input.status as any));
+          }
+        }
+
+        if (ctx.user.role === "student") {
+          oToFilters.push(eq(oneToOneSessions.studentId, ctx.user.id));
+        } else if (ctx.user.role === "teacher") {
+          oToFilters.push(eq(oneToOneSessions.teacherId, ctx.user.id));
+        } else if (!["super_admin", "admin", "academic_head"].includes(ctx.user.role)) {
+          oToFilters.push(sql`false`);
+        }
+
+        const oToWhere = oToFilters.length > 0 ? and(...oToFilters) : undefined;
+        oneToOnesList = await db.query.oneToOneSessions.findMany({
+          where: oToWhere,
+          orderBy: desc(oneToOneSessions.scheduledAt),
+          with: {
+            teacher: true,
+            student: true,
+          },
+        });
+      }
+
+      // ─── PART 3: FORMAT & MAP BOTH LISTS ───
+      let enrolledBatchMap = new Map<number, string>();
+      let activeEnrollmentsCountMap = new Map<number, number>();
+
+      if (ctx.user.role === "student") {
+        const studentEnrollments = await db.query.batchEnrollments.findMany({
+          where: and(
+            eq(batchEnrollments.studentId, ctx.user.id),
+            or(eq(batchEnrollments.status, "active"), eq(batchEnrollments.status, "restricted"))
+          ),
+          columns: { batchId: true, status: true },
+        });
+        for (const se of studentEnrollments) {
+          enrolledBatchMap.set(se.batchId, se.status || "active");
+        }
+
+        const counts = await db
+          .select({
+            batchId: batchEnrollments.batchId,
+            count: sql<number>`count(${batchEnrollments.id})::int`,
+          })
+          .from(batchEnrollments)
+          .where(eq(batchEnrollments.status, "active"))
+          .groupBy(batchEnrollments.batchId);
+        
+        for (const item of counts) {
+          activeEnrollmentsCountMap.set(item.batchId, item.count);
+        }
+      }
+
+      const mappedGroupClasses = groupClassesList.map(cls => {
+        let isEnrolled = false;
+        let enrollmentStatus: string | null = null;
+        let enrollmentAllowed = false;
+
+        if (ctx.user.role === "student") {
+          const classBatchIds = Array.from(new Set([cls.batchId, ...(cls.classBatches?.map((cb: any) => cb.batchId) || [])]));
+          for (const bid of classBatchIds) {
+            const status = enrolledBatchMap.get(bid);
+            if (status) {
+              isEnrolled = true;
+              enrollmentStatus = status;
             }
           }
-        },
+
+          const primaryBatch = cls.batch;
+          if (primaryBatch && primaryBatch.status === "active") {
+            const currentCount = activeEnrollmentsCountMap.get(primaryBatch.id) || 0;
+            const maxStudents = primaryBatch.maxStudents ?? 30;
+            if (currentCount < maxStudents) {
+              enrollmentAllowed = true;
+            }
+          }
+        }
+
+        return {
+          ...cls,
+          meetingUrl: isRestricted ? null : cls.meetingUrl,
+          recordingUrl: isRestricted ? null : cls.recordingUrl,
+          batch: cls.batch || null,
+          batches: cls.classBatches?.map((cb: any) => cb.batch).filter(Boolean) || [],
+          isEnrolled,
+          enrollmentStatus,
+          enrollmentAllowed,
+        };
       });
 
-      const isRestricted = ctx.user.role === "student" ? await isStudentFeeRestricted(ctx.user.id) : false;
+      const mappedOneToOnes = oneToOnesList.map(s => {
+        let mappedStatus: "scheduled" | "ongoing" | "completed" | "cancelled" = "scheduled";
+        if (s.status === "ongoing") mappedStatus = "ongoing";
+        else if (s.status === "completed") mappedStatus = "completed";
+        else if (s.status === "cancelled") mappedStatus = "cancelled";
+        else if (s.status === "rescheduled") mappedStatus = "scheduled";
 
-      return list.map(cls => ({
-        ...cls,
-        meetingUrl: isRestricted ? null : cls.meetingUrl,
-        recordingUrl: isRestricted ? null : cls.recordingUrl,
-        batch: cls.batch || null,
-        batches: cls.classBatches?.map(cb => cb.batch).filter(Boolean) || []
-      }));
+        return {
+          id: s.id,
+          batchId: null,
+          teacherId: s.teacherId,
+          title: s.title,
+          description: s.remarks || null,
+          classType: "one_to_one" as const,
+          status: mappedStatus,
+          scheduledAt: s.scheduledAt,
+          startedAt: s.startedAt,
+          endedAt: s.endedAt,
+          duration: s.sessionLength,
+          meetingUrl: isRestricted ? null : s.meetingUrl,
+          meetingRoomId: s.meetingRoomId,
+          teacher: s.teacher || null,
+          student: s.student || null,
+          batch: null,
+          batches: [],
+          classBatches: [],
+          isEnrolled: s.studentId === ctx.user.id,
+          enrollmentStatus: s.studentId === ctx.user.id ? "active" : null,
+          enrollmentAllowed: false,
+        };
+      });
+
+      const mergedList = [...mappedGroupClasses, ...mappedOneToOnes];
+      mergedList.sort((a, b) => b.scheduledAt.getTime() - a.scheduledAt.getTime());
+
+      return mergedList;
     }),
 
   getMeetingDetails: authedQuery
@@ -288,7 +440,7 @@ export const classRouter = createRouter({
         notificationData
       );
 
-      return db.query.classes.findFirst({
+      const createdClass = await db.query.classes.findFirst({
         where: eq(classes.id, newClass.id),
         with: {
           teacher: true,
@@ -299,6 +451,13 @@ export const classRouter = createRouter({
           }
         }
       });
+
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
+      return createdClass;
     }),
 
   edit: authedQuery
@@ -372,6 +531,15 @@ export const classRouter = createRouter({
         }))
       );
 
+      // Recalculate salary if class is/was completed
+      if (cls.status === "completed" || input.scheduledAt !== cls.scheduledAt) {
+        const oldMonth = new Date(cls.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, cls.teacherId, oldMonth);
+        
+        const newMonth = new Date(input.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, input.teacherId, newMonth);
+      }
+
       return { success: true };
     }),
 
@@ -432,6 +600,7 @@ export const classRouter = createRouter({
             title: cls.title,
           });
         }
+        io.emit("class:updated");
       }
 
       return { success: true };
@@ -454,12 +623,31 @@ export const classRouter = createRouter({
       }
 
       const endedAt = new Date();
-      const duration = cls.startedAt
+      const actualDuration = cls.startedAt
         ? Math.floor((endedAt.getTime() - new Date(cls.startedAt).getTime()) / 60000)
         : 0;
       await db.update(classes)
-        .set({ status: "completed", endedAt, duration })
+        .set({ status: "completed", endedAt, actualDuration })
         .where(eq(classes.id, input.id));
+
+      // Recalculate salary
+      const monthStr = new Date(cls.scheduledAt).toISOString().substring(0, 7);
+      await recalculateSalaryInternal(db, cls.teacherId, monthStr);
+
+      const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, input.id));
+      const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+      const io = getIo();
+      if (io) {
+        for (const bid of classBatchIds) {
+          io.to(`batch:${bid}`).emit("class:ended", {
+            batchId: bid,
+            classId: input.id,
+          });
+        }
+        io.emit("class:updated");
+      }
+
       return { success: true };
     }),
 
@@ -482,6 +670,26 @@ export const classRouter = createRouter({
       await db.update(classes)
         .set({ status: "cancelled" })
         .where(eq(classes.id, input.id));
+
+      if (cls.status === "completed") {
+        const monthStr = new Date(cls.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, cls.teacherId, monthStr);
+      }
+
+      const cbList = await db.select({ batchId: classBatches.batchId }).from(classBatches).where(eq(classBatches.classId, input.id));
+      const classBatchIds = Array.from(new Set([cls.batchId, ...cbList.map(x => x.batchId)]));
+
+      const io = getIo();
+      if (io) {
+        for (const bid of classBatchIds) {
+          io.to(`batch:${bid}`).emit("class:cancelled", {
+            batchId: bid,
+            classId: input.id,
+          });
+        }
+        io.emit("class:updated");
+      }
+
       return { success: true };
     }),
 
@@ -497,7 +705,7 @@ export const classRouter = createRouter({
         filters.push(eq(oneToOneSessions.studentId, ctx.user.id));
       } else if (ctx.user.role === "teacher") {
         filters.push(eq(oneToOneSessions.teacherId, ctx.user.id));
-      } else if (ctx.user.role === "super_admin") {
+      } else if (["super_admin", "admin", "academic_head"].includes(ctx.user.role)) {
         if (input?.studentId) filters.push(eq(oneToOneSessions.studentId, input.studentId));
         if (input?.teacherId) filters.push(eq(oneToOneSessions.teacherId, input.teacherId));
       } else {
@@ -585,6 +793,11 @@ export const classRouter = createRouter({
         );
       }
 
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
       return newSession;
     }),
 
@@ -649,6 +862,11 @@ export const classRouter = createRouter({
         );
       }
 
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
       return updatedSession;
     }),
 
@@ -682,6 +900,13 @@ export const classRouter = createRouter({
         reminder10MinSentAt: null,
       }).where(eq(oneToOneSessions.id, input.sessionId));
 
+      if (oldSession.status === "completed") {
+        const oldMonth = new Date(oldSession.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, oldSession.teacherId, oldMonth);
+        const newMonth = new Date(input.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, oldSession.teacherId, newMonth);
+      }
+
       const updatedSession = await db.query.oneToOneSessions.findFirst({
         where: eq(oneToOneSessions.id, input.sessionId),
         with: { teacher: true, student: true },
@@ -707,6 +932,11 @@ export const classRouter = createRouter({
         );
       }
 
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
       return updatedSession;
     }),
 
@@ -728,6 +958,11 @@ export const classRouter = createRouter({
         status: "cancelled",
       }).where(eq(oneToOneSessions.id, input.sessionId));
 
+      if (session.status === "completed") {
+        const monthStr = new Date(session.scheduledAt).toISOString().substring(0, 7);
+        await recalculateSalaryInternal(db, session.teacherId, monthStr);
+      }
+
       // Notify Student of cancellation
       await sendNotification(
         session.studentId,
@@ -745,6 +980,11 @@ export const classRouter = createRouter({
         "class_cancelled",
         { sessionId: session.id }
       );
+
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
 
       return { success: true };
     }),
@@ -841,7 +1081,12 @@ export const classRouter = createRouter({
         orderBy: desc(oneToOneRescheduleRequests.requestedAt),
         with: {
           session: {
-            with: { teacher: true, student: true }
+            with: {
+              teacher: true,
+              student: {
+                with: { profile: true }
+              }
+            }
           },
           requestedByUser: true,
           resolvedByUser: true,
@@ -982,6 +1227,11 @@ export const classRouter = createRouter({
         { sessionId: session.id }
       );
 
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
       return { success: true };
     }),
 
@@ -1086,6 +1336,11 @@ export const classRouter = createRouter({
 
       await updateStudentSessionBalances(db, session.studentId);
 
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
       return { success: true };
     }),
 
@@ -1122,8 +1377,12 @@ export const classRouter = createRouter({
       }
 
       await db.update(oneToOneSessions)
-        .set({ status: "completed", completedAt: new Date() })
+        .set({ status: "completed", completedAt: new Date(), actualDuration: input.actualDurationMinutes })
         .where(eq(oneToOneSessions.id, input.sessionId));
+
+      // Recalculate salary for this teacher and month
+      const monthStr = new Date(session.scheduledAt).toISOString().substring(0, 7);
+      await recalculateSalaryInternal(db, session.teacherId, monthStr);
 
       await updateStudentSessionBalances(db, session.studentId);
 
@@ -1188,7 +1447,11 @@ export const classRouter = createRouter({
       const db = getDb();
       return db.query.attendance.findMany({
         where: eq(attendance.classId, input.classId),
-        with: { student: true },
+        with: {
+          student: {
+            with: { profile: true }
+          }
+        },
       });
     }),
 
@@ -1540,7 +1803,9 @@ export const classRouter = createRouter({
         where: eq(classJoinRequests.classId, input.classId),
         orderBy: desc(classJoinRequests.createdAt),
         with: {
-          student: true,
+          student: {
+            with: { profile: true }
+          },
         },
       });
 
@@ -1551,7 +1816,7 @@ export const classRouter = createRouter({
         status: req.status,
         createdAt: req.createdAt,
         studentName: req.student?.name || "Unknown Student",
-        studentUnionId: req.student?.unionId || "",
+        studentUnionId: req.student?.profile?.enrollmentId || req.student?.unionId || "",
       }));
     }),
 
@@ -1766,18 +2031,20 @@ export const classRouter = createRouter({
         filters.push(inArray(attendanceAlerts.batchId, batchIds));
       }
 
-      // If search is provided, we filter by student name, username, or unionId
+      // If search is provided, we filter by student name, username, unionId, or enrollmentId
       if (input.search) {
         const matchingStudents = await db
           .select({ id: users.id })
           .from(users)
+          .leftJoin(profiles, eq(users.id, profiles.userId))
           .where(
             and(
               eq(users.role, "student"),
               or(
                 ilike(users.name, "%" + input.search + "%"),
                 ilike(users.username, "%" + input.search + "%"),
-                ilike(users.unionId, "%" + input.search + "%")
+                ilike(users.unionId, "%" + input.search + "%"),
+                ilike(profiles.enrollmentId, "%" + input.search + "%")
               )
             )
           );
@@ -1793,7 +2060,9 @@ export const classRouter = createRouter({
         where: and(...filters),
         orderBy: desc(attendanceAlerts.createdAt),
         with: {
-          student: true,
+          student: {
+            with: { profile: true }
+          },
           batch: {
             with: {
               teacher: true,
@@ -1803,5 +2072,181 @@ export const classRouter = createRouter({
       });
 
       return list;
+    }),
+
+  enrollAndJoin: authedQuery
+    .input(z.object({ classId: z.number() }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const cls = await db.query.classes.findFirst({
+        where: eq(classes.id, input.classId),
+      });
+      if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
+
+      if (ctx.user.role !== "student") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only students can use this feature." });
+      }
+
+      if (await isStudentFeeRestricted(ctx.user.id)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Access Restricted Due to Outstanding Fees." });
+      }
+
+      // Check if the batch is active
+      const batch = await db.query.batches.findFirst({
+        where: eq(batches.id, cls.batchId),
+        with: { module: true },
+      });
+
+      if (!batch || batch.status !== "active") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Enrollment is not allowed for this class batch." });
+      }
+
+      // Check if batch is full
+      const activeEnrollments = await db.select({
+        count: sql<number>`count(${batchEnrollments.id})::int`
+      })
+      .from(batchEnrollments)
+      .where(and(eq(batchEnrollments.batchId, batch.id), eq(batchEnrollments.status, "active")));
+
+      const currentCount = Number(activeEnrollments[0]?.count || 0);
+      const maxStudents = batch.maxStudents ?? 30;
+      if (currentCount >= maxStudents) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "This batch is already full." });
+      }
+
+      // 1. Create enrollment record / Add student to batch
+      const existingEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.batchId, batch.id),
+          eq(batchEnrollments.studentId, ctx.user.id)
+        ),
+      });
+
+      if (!existingEnrollment) {
+        await db.insert(batchEnrollments).values({
+          batchId: batch.id,
+          studentId: ctx.user.id,
+          status: "active",
+        });
+      } else if (existingEnrollment.status !== "active") {
+        await db.update(batchEnrollments)
+          .set({ status: "active", leftAt: null })
+          .where(eq(batchEnrollments.id, existingEnrollment.id));
+      }
+
+      // Update student profile batch/course settings and ensure they have group sessions allocated
+      const profile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, ctx.user.id),
+      });
+
+      let newAllocatedGroup = profile ? (profile.allocatedGroupSessions ?? 0) : 0;
+      if (newAllocatedGroup === 0) {
+        newAllocatedGroup = 10;
+      } else {
+        newAllocatedGroup += 10;
+      }
+
+      const remainingGroup = newAllocatedGroup - (profile ? (profile.attendedGroupSessions ?? 0) : 0);
+      const remainingOneToOne = profile ? (profile.remainingOneToOneSessions ?? 0) : 0;
+
+      if (profile) {
+        await db.update(profiles)
+          .set({
+            batch: batch.name,
+            batchTime: batch.timeSlot,
+            course: batch.module?.name || null,
+            allocatedGroupSessions: newAllocatedGroup,
+            remainingGroupSessions: remainingGroup,
+            totalAllocatedSessions: newAllocatedGroup + (profile.allocatedOneToOneSessions ?? 0),
+            totalRemainingSessions: remainingGroup + remainingOneToOne,
+            activityTimeline: [
+              ...(Array.isArray(profile.activityTimeline) ? profile.activityTimeline : []),
+              { type: "enroll_and_join", batchId: batch.id, timestamp: new Date().toISOString() }
+            ]
+          })
+          .where(eq(profiles.userId, ctx.user.id));
+      } else {
+        const nextEnrollmentId = await generateNextEnrollmentId();
+        await db.insert(profiles).values({
+          userId: ctx.user.id,
+          enrollmentId: nextEnrollmentId,
+          batch: batch.name,
+          batchTime: batch.timeSlot,
+          course: batch.module?.name || null,
+          allocatedGroupSessions: 10,
+          remainingGroupSessions: 10,
+          totalAllocatedSessions: 10,
+          totalRemainingSessions: 10,
+          attendedOneToOneSessions: 0,
+          attendedGroupSessions: 0,
+          totalAttendedSessions: 0,
+          activityTimeline: [{ type: "enroll_and_join", batchId: batch.id, timestamp: new Date().toISOString() }]
+        });
+      }
+
+      // 2. Generate approved class join request to bypass lobby
+      const existingJoinReq = await db.query.classJoinRequests.findFirst({
+        where: and(
+          eq(classJoinRequests.classId, cls.id),
+          eq(classJoinRequests.studentId, ctx.user.id)
+        ),
+      });
+
+      if (existingJoinReq) {
+        await db.update(classJoinRequests)
+          .set({ status: "approved", updatedAt: new Date() })
+          .where(eq(classJoinRequests.id, existingJoinReq.id));
+      } else {
+        await db.insert(classJoinRequests).values({
+          classId: cls.id,
+          studentId: ctx.user.id,
+          status: "approved",
+        });
+      }
+
+      // 3. Generate attendance entry
+      const existingAttendance = await db.query.attendance.findFirst({
+        where: and(eq(attendance.classId, cls.id), eq(attendance.studentId, ctx.user.id)),
+      });
+
+      if (existingAttendance) {
+        await db.update(attendance)
+          .set({ joinedAt: new Date(), status: "present" })
+          .where(eq(attendance.id, existingAttendance.id));
+      } else {
+        await db.insert(attendance).values({
+          classId: cls.id,
+          studentId: ctx.user.id,
+          joinedAt: new Date(),
+          status: "present",
+        });
+      }
+
+      // Resolve active attendance alerts on class join
+      await db.update(attendanceAlerts)
+        .set({ status: "resolved", resolvedAt: new Date() })
+        .where(and(
+          eq(attendanceAlerts.studentId, ctx.user.id),
+          eq(attendanceAlerts.batchId, batch.id),
+          eq(attendanceAlerts.status, "active")
+        ));
+
+      await updateStudentSessionBalances(db, ctx.user.id);
+
+      // Create notification
+      await db.insert(notifications).values({
+        userId: ctx.user.id,
+        title: "Enrollment Successful",
+        message: `Successfully enrolled and joined class in batch "${batch.name}"!`,
+        type: "enrollment_success",
+      });
+
+      // Broadcast update
+      const io = getIo();
+      if (io) {
+        io.emit("class:updated");
+      }
+
+      return { success: true };
     }),
 });

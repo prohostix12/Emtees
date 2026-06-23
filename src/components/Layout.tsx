@@ -25,6 +25,9 @@ import {
   Star,
   GraduationCap,
   Globe,
+  Contact,
+  Clock,
+  User,
 } from "lucide-react";
 import { useSocket, useClassStartedAlert } from "@/hooks/useSocket";
 import { trpc } from "@/providers/trpc";
@@ -34,11 +37,14 @@ import { toast } from "sonner";
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/" },
   { icon: Users, label: "Users", path: "/users" },
+  { icon: Contact, label: "Students", path: "/students" },
+  { icon: Users, label: "Sales Executives", path: "/sales-management/executives" },
   { icon: BookOpen, label: "Batches", path: "/batches" },
   { icon: MessageCircle, label: "Chat", path: "/chat" },
   { icon: Globe, label: "Community", path: "/community" },
   { icon: MessageSquare, label: "Private Messages", path: "/messages" },
-  { icon: Calendar, label: "Classes", path: "/classes" },
+  { icon: Calendar, label: "Group Sessions", path: "/classes/group" },
+  { icon: Clock, label: "1 on 1 Sessions", path: "/classes/one-to-one" },
   { icon: GraduationCap, label: "Learning", path: "/learning" },
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Coins, label: "Salaries", path: "/salaries" },
@@ -56,7 +62,8 @@ const studentNav = [
   { icon: MessageCircle, label: "Chat", path: "/chat" },
   { icon: Globe, label: "Community", path: "/community" },
   { icon: MessageSquare, label: "Private Messages", path: "/messages" },
-  { icon: Calendar, label: "Classes", path: "/classes" },
+  { icon: Calendar, label: "Group Sessions", path: "/classes/group" },
+  { icon: Clock, label: "1 on 1 Sessions", path: "/classes/one-to-one" },
   { icon: GraduationCap, label: "Learning", path: "/learning" },
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Star, label: "Feedback", path: "/feedback" },
@@ -64,6 +71,14 @@ const studentNav = [
   { icon: BarChart3, label: "Progress", path: "/reports" },
   { icon: Bell, label: "Alerts", path: "/notifications" },
   { icon: Shield, label: "Discipline", path: "/discipline" },
+];
+
+const salesNav = [
+  { icon: LayoutDashboard, label: "Dashboard", path: "/" },
+  { icon: Contact, label: "My Students", path: "/sales-executive/students" },
+  { icon: GitPullRequest, label: "Enrollments", path: "/sales-management/registrations" },
+  { icon: User, label: "Profile", path: "/settings?tab=profile" },
+  { icon: Settings, label: "Settings", path: "/settings?tab=security" },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -145,7 +160,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   if (!user) return null;
 
-  let items = user.role === "student" ? [...studentNav] : [...navItems];
+  let items = user.role === "student"
+    ? [...studentNav]
+    : user.role === "sales_executive"
+    ? [...salesNav]
+    : [...navItems];
+
   if (user.role === "student") {
     const completionDate = myProfileQuery.data?.profile?.completionDate;
     const hasCompleted = completionDate !== null && completionDate !== undefined;
@@ -155,6 +175,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   }
   if (!["super_admin", "teacher"].includes(user.role)) {
     items = items.filter((item) => item.path !== "/salaries");
+  }
+  if (!["super_admin", "admin"].includes(user.role)) {
+    items = items.filter((item) => item.path !== "/sales-management/executives");
   }
   if (user.role === "academic_head") {
     items = items.filter((item) => item.path !== "/settings" && item.path !== "/fees");

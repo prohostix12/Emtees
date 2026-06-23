@@ -561,7 +561,7 @@ export default function LearningPage() {
               >
                 <option value="all">All Students</option>
                 {students?.map((s: any) => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.unionId})</option>
+                  <option key={s.id} value={s.id}>{s.name} ({s.profile?.enrollmentId || s.unionId})</option>
                 ))}
               </select>
             </div>
@@ -1192,7 +1192,7 @@ export default function LearningPage() {
                 >
                   <option value="">Select Student</option>
                   {students?.map((s: any) => (
-                    <option key={s.id} value={s.id}>{s.name} ({s.unionId})</option>
+                    <option key={s.id} value={s.id}>{s.name} ({s.profile?.enrollmentId || s.unionId})</option>
                   ))}
                 </select>
               </div>
@@ -1533,7 +1533,7 @@ export default function LearningPage() {
                   <TableBody>
                     {assignmentSubmissionsQuery.data.map((sub) => (
                       <TableRow key={sub.id}>
-                        <TableCell className="font-semibold text-gray-800">{sub.student?.name} ({sub.student?.unionId})</TableCell>
+                        <TableCell className="font-semibold text-gray-800">{sub.student?.name} ({sub.student?.profile?.enrollmentId || sub.student?.unionId})</TableCell>
                         <TableCell className="text-xs text-gray-500">
                           {new Date(sub.submittedDate).toLocaleString()}
                         </TableCell>

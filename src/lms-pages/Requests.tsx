@@ -707,7 +707,7 @@ export default function RequestsPage() {
                                 </div>
                                 <div>
                                   <p className="text-sm font-semibold text-gray-900">{req.student?.name}</p>
-                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.student?.unionId}</p>
+                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.student?.profile?.enrollmentId || req.student?.unionId}</p>
                                 </div>
                               </div>
                             </TableCell>
@@ -812,7 +812,7 @@ export default function RequestsPage() {
                                 </div>
                                 <div>
                                   <p className="text-sm font-semibold text-gray-900">{req.student?.name}</p>
-                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.student?.unionId}</p>
+                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.student?.profile?.enrollmentId || req.student?.unionId}</p>
                                 </div>
                               </div>
                             </TableCell>
@@ -961,7 +961,7 @@ export default function RequestsPage() {
                                 </div>
                                 <div>
                                   <p className="text-sm font-semibold text-gray-900">{req.session?.student?.name}</p>
-                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.session?.student?.unionId}</p>
+                                  <p className="text-[10px] text-gray-400 tracking-wider font-light uppercase">{req.session?.student?.profile?.enrollmentId || req.session?.student?.unionId}</p>
                                 </div>
                               </div>
                             </TableCell>

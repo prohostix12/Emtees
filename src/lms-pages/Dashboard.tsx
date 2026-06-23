@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/providers/trpc";
 import { useAuth } from "@/hooks/useAuth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +15,9 @@ import {
   Play,
   Video,
   AlertCircle,
+  UserCheck,
+  BarChart3,
+  Settings,
 } from "lucide-react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -23,6 +26,9 @@ import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { socket } from "@/lib/socket";
+import { Clock, Bell, Check } from "lucide-react";
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -30,7 +36,9 @@ export default function Dashboard() {
   const isTeacher = user?.role === "teacher";
 
   const statsQuery = trpc.admin.getDashboardStats.useQuery(undefined, { enabled: isAdmin });
-  const myBatches = trpc.user.myBatches.useQuery(undefined, { enabled: !isAdmin });
+  const myBatches = trpc.user.myBatches.useQuery(undefined, { enabled: user?.role === "student" || user?.role === "teacher" });
+  const salesStatsQuery = trpc.salesExecutive.getDashboardStats.useQuery(undefined, { enabled: user?.role === "sales_executive" });
+  const referralLinkQuery = trpc.salesExecutive.getReferralLink.useQuery(undefined, { enabled: user?.role === "sales_executive" });
   const myAttendance = trpc.class.myAttendance.useQuery(undefined, { enabled: user?.role === "student" });
   const notifications = trpc.student.myNotifications.useQuery(undefined, { enabled: user?.role === "student" });
   const teacherStatsQuery = trpc.user.getTeacherStats.useQuery(undefined, { enabled: isTeacher });
@@ -58,6 +66,14 @@ export default function Dashboard() {
     onError: (err) => toast.error(err.message),
   });
 
+  const startOneToOne = trpc.class.startOneToOne.useMutation({
+    onSuccess: () => {
+      toast.success("One-to-One Session started");
+      classesQuery.refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
   const recordJoinTime = trpc.class.recordJoinTime.useMutation({
     onError: (err) => toast.error(err.message),
   });
@@ -68,9 +84,15 @@ export default function Dashboard() {
 
   const handleStartClass = async (cls: any) => {
     try {
-      await startClass.mutateAsync({ id: cls.id });
-      setSelectedClassForMeeting(cls);
-      setJitsiRoom(cls.meetingRoomId || `class-${cls.id}`);
+      if (cls.classType === "one_to_one") {
+        await startOneToOne.mutateAsync({ sessionId: cls.id });
+        setSelectedClassForMeeting(cls);
+        setJitsiRoom(cls.meetingRoomId || `session-${cls.id}`);
+      } else {
+        await startClass.mutateAsync({ id: cls.id });
+        setSelectedClassForMeeting(cls);
+        setJitsiRoom(cls.meetingRoomId || `class-${cls.id}`);
+      }
     } catch (err: any) {
       toast.error(err.message || "Failed to start meeting");
     }
@@ -78,12 +100,176 @@ export default function Dashboard() {
 
   const handleJoinClass = (cls: any) => {
     setSelectedClassForMeeting(cls);
-    setJitsiRoom(cls.meetingRoomId || `class-${cls.id}`);
+    setJitsiRoom(cls.meetingRoomId || (cls.classType === "one_to_one" ? `session-${cls.id}` : `class-${cls.id}`));
   };
+
+  // Local time state updating every minute
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Reminder states persisting to localStorage
+  const [reminders, setReminders] = useState<Record<number, boolean>>({});
+  
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("session_reminders");
+      if (stored) {
+        setReminders(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  const handleToggleReminder = (classId: number) => {
+    const updated = { ...reminders, [classId]: !reminders[classId] };
+    setReminders(updated);
+    try {
+      localStorage.setItem("session_reminders", JSON.stringify(updated));
+    } catch (e) {
+      console.error(e);
+    }
+    if (updated[classId]) {
+      toast.success("Reminder added! You will be notified when this session starts.");
+    } else {
+      toast.info("Reminder removed.");
+    }
+  };
+
+  // View Details Modal States
+  const [selectedClassForDetails, setSelectedClassForDetails] = useState<any>(null);
+  const [openDetailsModal, setOpenDetailsModal] = useState(false);
+
+  // Enroll & Join Mutation
+  const enrollAndJoin = trpc.class.enrollAndJoin.useMutation({
+    onSuccess: (data, variables) => {
+      toast.success("Successfully enrolled and joined class.");
+      classesQuery.refetch();
+      // Locate the newly enrolled class to launch meeting room immediately
+      const cls = classesQuery.data?.find(c => c.id === variables.classId);
+      if (cls) {
+        handleJoinClass(cls);
+      }
+    },
+    onError: (err) => {
+      toast.error(err.message || "Failed to enroll and join class.");
+    }
+  });
+
+  // Socket listener for real-time updates
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleClassUpdate = () => {
+      classesQuery.refetch();
+    };
+
+    socket.on("class:updated", handleClassUpdate);
+    socket.on("class:started", handleClassUpdate);
+    socket.on("class:ended", handleClassUpdate);
+    socket.on("class:cancelled", handleClassUpdate);
+
+    return () => {
+      socket.off("class:updated", handleClassUpdate);
+      socket.off("class:started", handleClassUpdate);
+      socket.off("class:ended", handleClassUpdate);
+      socket.off("class:cancelled", handleClassUpdate);
+    };
+  }, [socket]);
 
   const stats = statsQuery.data;
 
   if (!user) return null;
+
+  if (user.role === "sales_executive") {
+    const stats = salesStatsQuery.data;
+    const refLink = referralLinkQuery.data;
+
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-emerald-700 p-6 rounded-2xl text-white shadow-md">
+          <div>
+            <h2 className="text-xl font-bold">Welcome back, {user.name}!</h2>
+            <p className="text-xs text-emerald-100 mt-1">Here is your sales performance snapshot</p>
+          </div>
+          {refLink && (
+            <div className="bg-white/10 border border-white/20 p-3 rounded-xl flex items-center gap-3 w-full md:w-auto">
+              <div className="min-w-0">
+                <span className="text-[10px] text-emerald-200 block uppercase font-semibold">Your Referral Link</span>
+                <span className="text-xs font-mono font-bold truncate block">{typeof window !== "undefined" ? window.location.origin : ""}{refLink.link}</span>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="bg-white hover:bg-emerald-50 text-emerald-800 shrink-0 font-semibold"
+                onClick={() => {
+                  if (typeof window !== "undefined") {
+                    navigator.clipboard.writeText(`${window.location.origin}${refLink.link}`);
+                    toast.success("Referral link copied!");
+                  }
+                }}
+              >
+                Copy Link
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* Dashboard Stats */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
+          <StatCard icon={UserCheck} label="Registrations" value={stats?.totalRegistrations ?? 0} color="bg-emerald-50 text-emerald-600" />
+          <StatCard icon={GraduationCap} label="Enrollments" value={stats?.totalEnrollments ?? 0} color="bg-purple-50 text-purple-600" />
+        </div>
+
+        <div className="grid grid-cols-1 gap-6">
+          {/* Recent Referrals */}
+          <Card className="border border-gray-100 shadow-sm rounded-xl overflow-hidden">
+            <CardHeader className="pb-2 border-b bg-gray-50/50">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                Recent Registrations
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pt-4 p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-xs font-semibold">Student ID</TableHead>
+                      <TableHead className="text-xs font-semibold">Name</TableHead>
+                      <TableHead className="text-xs font-semibold">Phone</TableHead>
+                      <TableHead className="text-xs font-semibold">Joined</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {!stats?.recentRegistrations || stats.recentRegistrations.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="text-center text-xs text-gray-500 py-6">No students registered yet</TableCell>
+                      </TableRow>
+                    ) : (
+                      stats.recentRegistrations.map((student) => (
+                        <TableRow key={student.id} className="hover:bg-gray-50/50 transition-colors">
+                          <TableCell className="text-xs font-semibold font-mono text-emerald-700">{student.profile?.enrollmentId || student.unionId}</TableCell>
+                          <TableCell className="text-xs font-medium text-gray-900">{student.name}</TableCell>
+                          <TableCell className="text-xs text-gray-600">{student.phone || "-"}</TableCell>
+                          <TableCell className="text-xs text-gray-500">{new Date(student.createdAt).toLocaleDateString()}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   const activeAlerts = attendanceAlertsQuery.data || [];
   const uniqueBatches = Array.from(
@@ -98,7 +284,7 @@ export default function Dashboard() {
     if (alertsSearch) {
       const searchLower = alertsSearch.toLowerCase();
       const nameMatch = alert.student?.name?.toLowerCase().includes(searchLower);
-      const unionIdMatch = alert.student?.unionId?.toLowerCase().includes(searchLower);
+      const unionIdMatch = (alert.student?.profile?.enrollmentId || alert.student?.unionId)?.toLowerCase().includes(searchLower);
       if (!nameMatch && !unionIdMatch) {
         return false;
       }
@@ -142,6 +328,7 @@ export default function Dashboard() {
           <>
             <StatCard icon={Calendar} label="My Classes" value={teacherStatsQuery.data?.classesCount ?? 0} color="bg-blue-50 text-blue-600" />
             <StatCard icon={Users} label="My Students" value={teacherStatsQuery.data?.studentCount ?? 0} color="bg-emerald-50 text-emerald-600" />
+            <StatCard icon={CreditCard} label="Current Month Earnings" value={`₹${(teacherStatsQuery.data?.currentMonthEarnings ?? 0).toLocaleString("en-IN")}`} color="bg-amber-50 text-amber-600" />
           </>
         )}
         {user.role === "student" && (
@@ -245,14 +432,14 @@ export default function Dashboard() {
       {jitsiRoom && user && (
         <JitsiMeet
           classId={selectedClassForMeeting.classId || selectedClassForMeeting.id}
-          isOneToOne={selectedClassForMeeting.title?.startsWith("1-on-1") || !!selectedClassForMeeting.isOneToOne}
+          isOneToOne={selectedClassForMeeting.classType === "one_to_one" || selectedClassForMeeting.title?.startsWith("1-on-1") || !!selectedClassForMeeting.isOneToOne}
           onJoin={() => {
-            if (selectedClassForMeeting && user.role === "student" && !selectedClassForMeeting.title?.startsWith("1-on-1")) {
+            if (selectedClassForMeeting && user.role === "student" && selectedClassForMeeting.classType !== "one_to_one" && !selectedClassForMeeting.title?.startsWith("1-on-1")) {
               recordJoinTime.mutate({ classId: selectedClassForMeeting.classId || selectedClassForMeeting.id });
             }
           }}
           onLeave={() => {
-            if (selectedClassForMeeting && user.role === "student" && !selectedClassForMeeting.title?.startsWith("1-on-1")) {
+            if (selectedClassForMeeting && user.role === "student" && selectedClassForMeeting.classType !== "one_to_one" && !selectedClassForMeeting.title?.startsWith("1-on-1")) {
               recordLeaveTime.mutate({ classId: selectedClassForMeeting.classId || selectedClassForMeeting.id });
             }
           }}
@@ -284,59 +471,273 @@ export default function Dashboard() {
           </Link>
         </CardHeader>
         <CardContent className="pt-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {classesQuery.isLoading ? (
-              <p className="text-xs text-gray-400 col-span-2 py-4 text-center">Loading classes...</p>
-            ) : !classesQuery.data || classesQuery.data.filter(c => c.status === "ongoing" || c.status === "scheduled").length === 0 ? (
-              <p className="text-xs text-gray-400 col-span-2 py-6 text-center">No active or scheduled live classes found.</p>
-            ) : (
-              classesQuery.data
-                .filter(c => c.status === "ongoing" || c.status === "scheduled")
-                .slice(0, 4)
-                .map((cls) => (
-                  <div key={cls.id} className="flex items-center justify-between p-3.5 rounded-xl border border-gray-100 dark:border-gray-900 bg-white dark:bg-gray-950 hover:shadow-md hover:border-emerald-200/50 dark:hover:border-emerald-900/50 transition-all duration-300">
-                    <div className="space-y-1 min-w-0 pr-2">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-semibold text-xs text-gray-800 dark:text-gray-200 truncate max-w-[150px]">{cls.title}</span>
-                        {cls.status === "ongoing" ? (
-                          <Badge className="bg-red-500 hover:bg-red-600 text-white text-[9px] px-1 py-0 rounded animate-pulse">🔴 Live</Badge>
-                        ) : (
-                          <Badge variant="secondary" className="text-[9px] px-1 py-0 rounded bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200">Scheduled</Badge>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-gray-500 dark:text-gray-400 truncate">
-                        Host: {cls.teacher?.name || "Not assigned"}
-                      </p>
-                      <p className="text-[10px] text-gray-400 font-mono">
-                        Batch: {cls.batch?.name} | {cls.scheduledAt ? new Date(cls.scheduledAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : ""}
-                      </p>
+          {/* Dynamic calculations for live & upcoming classes */}
+          {(() => {
+            const nowTime = now.getTime();
+            const getPriority = (status: "LIVE NOW" | "STARTING SOON" | "UPCOMING") => {
+              if (status === "LIVE NOW") return 1;
+              if (status === "STARTING SOON") return 2;
+              return 3;
+            };
+
+            const classesList = (classesQuery.data || [])
+              .map((cls: any) => {
+                const startTime = new Date(cls.scheduledAt);
+                const endTime = new Date(startTime.getTime() + (cls.duration || 0) * 60 * 1000);
+                const diffMs = startTime.getTime() - nowTime;
+
+                let statusLabel: "LIVE NOW" | "STARTING SOON" | "UPCOMING" = "UPCOMING";
+                let isLive = false;
+
+                if (cls.status === "ongoing" || (cls.status === "scheduled" && nowTime >= startTime.getTime() && nowTime <= endTime.getTime())) {
+                  statusLabel = "LIVE NOW";
+                  isLive = true;
+                } else if (cls.status === "scheduled" && diffMs <= 30 * 60 * 1000 && diffMs > 0) {
+                  statusLabel = "STARTING SOON";
+                } else {
+                  statusLabel = "UPCOMING";
+                }
+
+                const isPast = cls.status === "completed" || cls.status === "cancelled" || (cls.status === "scheduled" && nowTime > endTime.getTime());
+
+                return {
+                  ...cls,
+                  startTime,
+                  endTime,
+                  diffMs,
+                  statusLabel,
+                  isLive,
+                  isPast,
+                };
+              })
+              .filter((cls) => !cls.isPast)
+              .sort((a, b) => {
+                const pA = getPriority(a.statusLabel);
+                const pB = getPriority(b.statusLabel);
+                if (pA !== pB) return pA - pB;
+                return a.startTime.getTime() - b.startTime.getTime();
+              })
+              .slice(0, 6);
+
+            const getCountdownString = (diffMs: number) => {
+              if (diffMs <= 0) return "Starting...";
+              const diffMins = Math.floor(diffMs / 60000);
+              const mins = diffMins % 60;
+              const diffHours = Math.floor(diffMins / 60);
+              const hours = diffHours % 24;
+              const days = Math.floor(diffHours / 24);
+
+              const parts = [];
+              if (days > 0) parts.push(`${days} Day${days > 1 ? "s" : ""}`);
+              if (hours > 0) parts.push(`${hours} Hour${hours > 1 ? "s" : ""}`);
+              if (mins > 0 || parts.length === 0) parts.push(`${mins} Min${mins > 1 ? "s" : ""}`);
+
+              return `Starts in: ${parts.join(" ")}`;
+            };
+
+            if (classesQuery.isLoading) {
+              return <p className="text-xs text-gray-400 py-6 text-center">Loading classes...</p>;
+            }
+
+            if (classesList.length === 0) {
+              return (
+                <div className="flex flex-col items-center justify-center py-10 px-4 text-center space-y-2">
+                  <div className="w-12 h-12 rounded-full bg-gray-50 dark:bg-gray-900/50 flex items-center justify-center text-gray-400 dark:text-gray-600 text-lg">
+                    📅
+                  </div>
+                  <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                    No live or upcoming sessions available.
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 max-w-xs leading-relaxed">
+                    Check back later for scheduled classes.
+                  </p>
+                </div>
+              );
+            }
+
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {classesList.map((cls) => (
+                  <div
+                    key={cls.id}
+                    className="relative flex flex-col justify-between p-5 rounded-2xl border border-gray-100 dark:border-gray-900 bg-white dark:bg-gray-950 hover:shadow-lg hover:border-emerald-200/60 dark:hover:border-emerald-900/60 transition-all duration-300"
+                  >
+                    {/* Header: Status Badge */}
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      {cls.statusLabel === "LIVE NOW" ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-50 text-red-600 border border-red-200 dark:bg-red-950/40 dark:text-red-400 dark:border-red-900 animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping"></span>
+                          🔴 LIVE NOW
+                        </span>
+                      ) : cls.statusLabel === "STARTING SOON" ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-600 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-900">
+                          🕒 STARTING SOON
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-50 text-blue-600 border border-blue-200 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-900">
+                          📅 UPCOMING
+                        </span>
+                      )}
+
+                      {cls.statusLabel !== "LIVE NOW" && (
+                        <span className="text-[10px] font-mono font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2 py-0.5 rounded-md">
+                          {getCountdownString(cls.diffMs)}
+                        </span>
+                      )}
                     </div>
 
-                    <div className="shrink-0">
-                      {cls.status === "ongoing" && (
-                        <Button
-                          size="sm"
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] h-8 px-3 rounded-lg flex items-center gap-1"
-                          onClick={() => handleJoinClass(cls)}
-                          disabled={!!myProfile.data?.isRestricted}
-                        >
-                          <Video className="w-3.5 h-3.5" /> Join
-                        </Button>
-                      )}
-                      {isTeacher && cls.teacherId === user.id && cls.status === "scheduled" && (
-                        <Button
-                          size="sm"
-                          className="bg-green-600 hover:bg-green-700 text-white text-[11px] h-8 px-3 rounded-lg flex items-center gap-1"
-                          onClick={() => handleStartClass(cls)}
-                        >
-                          <Play className="w-3.5 h-3.5" /> Start
-                        </Button>
+                    {/* Body */}
+                    <div className="space-y-2 mb-4">
+                      <div>
+                        <h4 className="font-bold text-sm text-gray-950 dark:text-white line-clamp-1">{cls.title}</h4>
+                        <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 line-clamp-1 mt-0.5">
+                          {cls.classType === "one_to_one" ? (
+                            <>
+                              One-to-One Session {cls.student?.name && `| Student: ${cls.student.name}`}
+                            </>
+                          ) : (
+                            <>
+                              Group Class | {cls.batch?.name || "Batch"} | {cls.batch?.module?.name || "Course"}
+                            </>
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="space-y-1 text-xs text-gray-600 dark:text-gray-400">
+                        <p className="flex items-center gap-1.5">
+                          <span className="font-semibold">Teacher:</span> {cls.teacher?.name || "Not assigned"}
+                        </p>
+                        <p className="flex items-center gap-1.5 font-mono text-[10px] text-gray-400">
+                          <span>Date:</span> {cls.startTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+                        </p>
+                        <p className="flex items-center gap-1.5 font-mono text-[10px] text-gray-400">
+                          <span>Time:</span> {cls.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({cls.duration || 60} mins)
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Footer Actions */}
+                    <div className="mt-auto pt-3 border-t border-gray-50 dark:border-gray-900 flex items-center gap-2">
+                      {user.role === "student" ? (
+                        !cls.isEnrolled ? (
+                          <Button
+                            size="sm"
+                            onClick={() => enrollAndJoin.mutate({ classId: cls.id })}
+                            disabled={enrollAndJoin.isPending}
+                            className="w-full bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700 text-white text-xs h-9 rounded-xl flex items-center justify-center gap-1.5 font-semibold shadow-md shadow-emerald-500/10"
+                          >
+                            {enrollAndJoin.isPending && enrollAndJoin.variables?.classId === cls.id ? (
+                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                            ) : (
+                              <Check className="w-4 h-4" />
+                            )}
+                            Enroll & Join
+                          </Button>
+                        ) : cls.statusLabel === "LIVE NOW" ? (
+                          <Button
+                            size="sm"
+                            onClick={() => handleJoinClass(cls)}
+                            disabled={!!myProfile.data?.isRestricted}
+                            className="w-full bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 text-white text-xs h-9 rounded-xl flex items-center justify-center gap-1.5 font-semibold shadow-md shadow-red-500/10"
+                          >
+                            <Video className="w-4 h-4" /> Join Live Class
+                          </Button>
+                        ) : (
+                          <div className="flex flex-col gap-2 w-full">
+                            <div className="grid grid-cols-2 gap-2 w-full">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setSelectedClassForDetails(cls);
+                                  setOpenDetailsModal(true);
+                                }}
+                                className="text-xs h-9 rounded-xl border-gray-200 text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-gray-900 font-semibold"
+                              >
+                                View Details
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleToggleReminder(cls.id)}
+                                className={`text-xs h-9 rounded-xl font-semibold flex items-center justify-center gap-1 ${
+                                  reminders[cls.id]
+                                    ? "bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-900"
+                                    : "border-gray-200 text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-gray-900"
+                                }`}
+                              >
+                                {reminders[cls.id] ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" /> Set
+                                  </>
+                                ) : (
+                                  <>
+                                    <Bell className="w-3.5 h-3.5 text-gray-400" /> Remind
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                            <Button
+                              size="sm"
+                              disabled
+                              className="w-full bg-gray-100 dark:bg-gray-900 text-gray-400 dark:text-gray-600 text-xs h-9 rounded-xl flex items-center justify-center gap-1.5 font-semibold cursor-not-allowed"
+                            >
+                              <Video className="w-4 h-4" /> Join Class (Disabled)
+                            </Button>
+                          </div>
+                        )
+                      ) : (
+                        <div className="flex flex-col gap-2 w-full">
+                          <div className={
+                            cls.status === "ongoing" || ((isTeacher && cls.teacherId === user.id) || user.role === "super_admin")
+                              ? "grid grid-cols-2 gap-2 w-full"
+                              : "w-full"
+                          }>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setSelectedClassForDetails(cls);
+                                setOpenDetailsModal(true);
+                              }}
+                              className="w-full text-xs h-9 rounded-xl border-gray-200 text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-gray-900 font-semibold"
+                            >
+                              View Details
+                            </Button>
+                            {cls.status === "ongoing" ? (
+                              <Button
+                                size="sm"
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs h-9 rounded-xl flex items-center justify-center gap-1.5 font-semibold"
+                                onClick={() => handleJoinClass(cls)}
+                              >
+                                <Video className="w-4 h-4" /> Join Class
+                              </Button>
+                            ) : (
+                              ((isTeacher && cls.teacherId === user.id) || user.role === "super_admin") && (
+                                <Button
+                                  size="sm"
+                                  className="bg-green-600 hover:bg-green-700 text-white text-xs h-9 rounded-xl flex items-center justify-center gap-1.5 font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                                  onClick={() => handleStartClass(cls)}
+                                  disabled={nowTime < cls.startTime.getTime() || startClass.isPending || startOneToOne.isPending}
+                                >
+                                  {((startClass.isPending && startClass.variables?.id === cls.id) || (startOneToOne.isPending && startOneToOne.variables?.sessionId === cls.id)) ? (
+                                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                  ) : (
+                                    <Play className="w-4 h-4" />
+                                  )}
+                                  Start Class
+                                </Button>
+                              )
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                   </div>
-                ))
-            )}
-          </div>
+                ))}
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
 
@@ -394,7 +795,7 @@ export default function Dashboard() {
                           {alert.student?.name}
                         </TableCell>
                         <TableCell className="py-2.5 text-xs text-gray-500 dark:text-gray-400 font-mono">
-                          {alert.student?.unionId}
+                          {alert.student?.profile?.enrollmentId || alert.student?.unionId}
                         </TableCell>
                         <TableCell className="py-2.5 text-xs text-gray-600 dark:text-gray-300">
                           {alert.batch?.name}
@@ -475,6 +876,95 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+      {/* Class Details Modal */}
+      {selectedClassForDetails && (
+        <Dialog open={openDetailsModal} onOpenChange={setOpenDetailsModal}>
+          <DialogContent className="max-w-md bg-white dark:bg-gray-950 border border-gray-100 dark:border-gray-900 rounded-2xl shadow-2xl p-6">
+            <DialogHeader className="pb-3 border-b border-gray-50 dark:border-gray-900/50">
+              <DialogTitle className="text-base font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                🎓 Class Session Details
+              </DialogTitle>
+              <DialogDescription className="text-xs text-gray-500 mt-1">
+                View the scheduling details for this upcoming live class.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-4 text-sm text-gray-800 dark:text-gray-200">
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Class Title</span>
+                <span className="font-bold text-base text-gray-950 dark:text-white">{selectedClassForDetails.title}</span>
+              </div>
+
+              {selectedClassForDetails.classType === "one_to_one" ? (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Session Type</span>
+                    <span className="font-medium text-xs text-purple-600 dark:text-purple-400">One-to-One Session</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Assigned Student</span>
+                    <span className="font-medium text-xs text-emerald-600 dark:text-emerald-400">{selectedClassForDetails.student?.name || "Not assigned"}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Batch</span>
+                    <span className="font-medium text-xs text-emerald-600 dark:text-emerald-400">{selectedClassForDetails.batch?.name || "Not assigned"}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Course Module</span>
+                    <span className="font-medium text-xs text-blue-600 dark:text-blue-400">{selectedClassForDetails.batch?.module?.name || "Not assigned"}</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Scheduled Date</span>
+                  <span className="text-xs font-mono">{selectedClassForDetails.startTime.toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Scheduled Time</span>
+                  <span className="text-xs font-mono">{selectedClassForDetails.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({selectedClassForDetails.duration || 60} mins)</span>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">Assigned Teacher</span>
+                <span className="text-xs font-medium">{selectedClassForDetails.teacher?.name || "No teacher assigned"}</span>
+              </div>
+
+              {selectedClassForDetails.description && (
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-gray-400 block tracking-wider">
+                    {selectedClassForDetails.classType === "one_to_one" ? "Remarks" : "Description / Agenda"}
+                  </span>
+                  <p className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 p-3 rounded-xl border border-gray-100 dark:border-gray-900/50 leading-relaxed">
+                    {selectedClassForDetails.description}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3 pt-4 border-t border-gray-50 dark:border-gray-900/50">
+              <Button
+                variant="outline"
+                className="flex-1 rounded-xl h-10 text-xs font-semibold"
+                onClick={() => handleToggleReminder(selectedClassForDetails.id)}
+              >
+                {reminders[selectedClassForDetails.id] ? "Remove Reminder" : "Add Reminder"}
+              </Button>
+              <Button
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-10 text-xs font-semibold"
+                onClick={() => setOpenDetailsModal(false)}
+              >
+                Close
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

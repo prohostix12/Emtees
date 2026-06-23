@@ -1333,7 +1333,11 @@ export const learningRouter = createRouter({
         where: conditions.length > 0 ? and(...conditions) : undefined,
         orderBy: desc(assignmentSubmissions.submittedDate),
         with: {
-          student: true,
+          student: {
+            with: {
+              profile: true
+            }
+          },
           assignment: {
             with: {
               module: true,

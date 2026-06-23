@@ -1007,7 +1007,7 @@ export default function BatchesPage() {
                     </div>
                     <div className="space-y-1">
                       <p className="text-xs text-gray-500 uppercase tracking-wider">Student ID</p>
-                      <p className="font-semibold text-gray-800 font-mono">{user?.unionId}</p>
+                      <p className="font-semibold text-gray-800 font-mono">{myProfile?.data?.profile?.enrollmentId || user?.unionId}</p>
                     </div>
                     <div className="space-y-1">
                       <p className="text-xs text-gray-500 uppercase tracking-wider">Payment Status</p>
@@ -1191,7 +1191,7 @@ export default function BatchesPage() {
                 <div key={student.id} className="flex items-center justify-between p-3 border rounded-lg bg-gray-50">
                   <div>
                     <p className="font-semibold text-gray-900">{student.name}</p>
-                    <p className="text-xs text-gray-500 font-mono">{student.unionId}</p>
+                    <p className="text-xs text-gray-500 font-mono">{student.profile?.enrollmentId || student.unionId}</p>
                     <p className="text-xs text-gray-500">
                       Phone: {student.phone || "-"} | Email: {student.email || "-"}
                       {student.profile && (
@@ -1250,7 +1250,7 @@ export default function BatchesPage() {
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Student ID:</span>
-                  <span className="font-semibold text-gray-800 font-mono">{receiptData?.student?.unionId || user?.unionId}</span>
+                  <span className="font-semibold text-gray-800 font-mono">{receiptData?.student?.profile?.enrollmentId || receiptData?.student?.unionId || myProfile?.data?.profile?.enrollmentId || user?.unionId}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Course:</span>

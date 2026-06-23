@@ -18,6 +18,11 @@ export const disciplineRouter = createRouter({
         with: {
           user: {
             columns: { name: true, unionId: true },
+            with: {
+              profile: {
+                columns: { enrollmentId: true },
+              },
+            },
           },
           reporter: {
             columns: { name: true },
@@ -33,6 +38,11 @@ export const disciplineRouter = createRouter({
         with: {
           user: {
             columns: { name: true, unionId: true },
+            with: {
+              profile: {
+                columns: { enrollmentId: true },
+              },
+            },
           },
           reporter: {
             columns: { name: true },
@@ -48,6 +58,11 @@ export const disciplineRouter = createRouter({
       with: {
         user: {
           columns: { name: true, unionId: true },
+          with: {
+            profile: {
+              columns: { enrollmentId: true },
+            },
+          },
         },
         reporter: {
           columns: { name: true },
@@ -202,7 +217,7 @@ export const disciplineRouter = createRouter({
       columns: { id: true, name: true, unionId: true },
       with: {
         profile: {
-          columns: { batch: true },
+          columns: { batch: true, enrollmentId: true },
         },
       },
     });

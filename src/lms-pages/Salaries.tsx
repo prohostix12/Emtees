@@ -33,8 +33,12 @@ export default function SalariesPage() {
   // Salary Config Edit Dialog State
   const [editTeacher, setEditTeacher] = useState<any>(null);
   const [basicSalary, setBasicSalary] = useState<number>(0);
-  const [groupClassRate, setGroupClassRate] = useState<number>(0);
-  const [oneToOneRate, setOneToOneRate] = useState<number>(0);
+  const [group30MinRate, setGroup30MinRate] = useState<number>(0);
+  const [group45MinRate, setGroup45MinRate] = useState<number>(0);
+  const [group60MinRate, setGroup60MinRate] = useState<number>(0);
+  const [oneToOne30MinRate, setOneToOne30MinRate] = useState<number>(0);
+  const [oneToOne45MinRate, setOneToOne45MinRate] = useState<number>(0);
+  const [oneToOne60MinRate, setOneToOne60MinRate] = useState<number>(0);
   const [configDialogOpen, setConfigDialogOpen] = useState<boolean>(false);
 
   // Mark as Paid Dialog State
@@ -125,8 +129,12 @@ export default function SalariesPage() {
   useEffect(() => {
     if (configQuery.data) {
       setBasicSalary(parseFloat(configQuery.data.basicSalary) || 0);
-      setGroupClassRate(parseFloat(configQuery.data.groupClassRate) || 0);
-      setOneToOneRate(parseFloat(configQuery.data.oneToOneRate) || 0);
+      setGroup30MinRate(parseFloat(configQuery.data.group30MinRate) || 0);
+      setGroup45MinRate(parseFloat(configQuery.data.group45MinRate) || 0);
+      setGroup60MinRate(parseFloat(configQuery.data.group60MinRate) || 0);
+      setOneToOne30MinRate(parseFloat(configQuery.data.oneToOne30MinRate) || 0);
+      setOneToOne45MinRate(parseFloat(configQuery.data.oneToOne45MinRate) || 0);
+      setOneToOne60MinRate(parseFloat(configQuery.data.oneToOne60MinRate) || 0);
     }
   }, [configQuery.data]);
 
@@ -135,8 +143,12 @@ export default function SalariesPage() {
     updateConfigMutation.mutate({
       teacherId: Number(editTeacher.id),
       basicSalary,
-      groupClassRate,
-      oneToOneRate
+      group30MinRate,
+      group45MinRate,
+      group60MinRate,
+      oneToOne30MinRate,
+      oneToOne45MinRate,
+      oneToOne60MinRate
     });
   };
 
@@ -154,6 +166,13 @@ export default function SalariesPage() {
   };
 
   const handleDownloadStatement = (salary: any) => {
+    const group30Earnings = (salary.group30MinCount || 0) * parseFloat(salary.group30MinRate || "0");
+    const group45Earnings = (salary.group45MinCount || 0) * parseFloat(salary.group45MinRate || "0");
+    const group60Earnings = (salary.group60MinCount || 0) * parseFloat(salary.group60MinRate || "0");
+    const oneToOne30Earnings = (salary.oneToOne30MinCount || 0) * parseFloat(salary.oneToOne30MinRate || "0");
+    const oneToOne45Earnings = (salary.oneToOne45MinCount || 0) * parseFloat(salary.oneToOne45MinRate || "0");
+    const oneToOne60Earnings = (salary.oneToOne60MinCount || 0) * parseFloat(salary.oneToOne60MinRate || "0");
+
     const data = {
       reportType: "Teacher Salary Statement",
       generatedAt: new Date().toISOString(),
@@ -161,12 +180,38 @@ export default function SalariesPage() {
       month: salary.month,
       breakdown: {
         basicSalary: parseFloat(salary.basicSalary || "0"),
-        completedGroupClasses: salary.groupClassesCount,
-        groupClassRate: parseFloat(salary.groupClassRate || "0"),
-        groupClassEarnings: salary.groupClassesCount * parseFloat(salary.groupClassRate || "0"),
-        completedOneToOneSessions: salary.oneToOneCount,
-        oneToOneSessionRate: parseFloat(salary.oneToOneRate || "0"),
-        oneToOneEarnings: salary.oneToOneCount * parseFloat(salary.oneToOneRate || "0"),
+        group30Min: {
+          count: salary.group30MinCount || 0,
+          rate: parseFloat(salary.group30MinRate || "0"),
+          amount: group30Earnings
+        },
+        group45Min: {
+          count: salary.group45MinCount || 0,
+          rate: parseFloat(salary.group45MinRate || "0"),
+          amount: group45Earnings
+        },
+        group60Min: {
+          count: salary.group60MinCount || 0,
+          rate: parseFloat(salary.group60MinRate || "0"),
+          amount: group60Earnings
+        },
+        oneToOne30Min: {
+          count: salary.oneToOne30MinCount || 0,
+          rate: parseFloat(salary.oneToOne30MinRate || "0"),
+          amount: oneToOne30Earnings
+        },
+        oneToOne45Min: {
+          count: salary.oneToOne45MinCount || 0,
+          rate: parseFloat(salary.oneToOne45MinRate || "0"),
+          amount: oneToOne45Earnings
+        },
+        oneToOne60Min: {
+          count: salary.oneToOne60MinCount || 0,
+          rate: parseFloat(salary.oneToOne60MinRate || "0"),
+          amount: oneToOne60Earnings
+        },
+        groupSessionEarnings: group30Earnings + group45Earnings + group60Earnings,
+        oneToOneSessionEarnings: oneToOne30Earnings + oneToOne45Earnings + oneToOne60Earnings,
         totalSalary: parseFloat(salary.totalAmount || "0")
       },
       paymentStatus: salary.status,
@@ -248,11 +293,11 @@ export default function SalariesPage() {
                           <TableCell className="font-semibold text-gray-900">{salary.teacher?.name || `Teacher #${salary.teacherId}`}</TableCell>
                           <TableCell className="font-medium text-emerald-700">{salary.month}</TableCell>
                           <TableCell>₹{parseFloat(salary.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
-                          <TableCell className="hidden md:table-cell font-medium">
-                            {salary.groupClassesCount} <span className="text-xs text-gray-400">× ₹{parseFloat(salary.groupClassRate || "0")}</span>
+                          <TableCell className="hidden md:table-cell font-medium text-xs">
+                            {Number(salary.group30MinCount || 0) + Number(salary.group45MinCount || 0) + Number(salary.group60MinCount || 0)} Completed
                           </TableCell>
-                          <TableCell className="hidden md:table-cell font-medium">
-                            {salary.oneToOneCount} <span className="text-xs text-gray-400">× ₹{parseFloat(salary.oneToOneRate || "0")}</span>
+                          <TableCell className="hidden md:table-cell font-medium text-xs">
+                            {Number(salary.oneToOne30MinCount || 0) + Number(salary.oneToOne45MinCount || 0) + Number(salary.oneToOne60MinCount || 0)} Sessions
                           </TableCell>
                           <TableCell className="font-bold text-gray-900">₹{parseFloat(salary.totalAmount || "0").toLocaleString("en-IN")}</TableCell>
                           <TableCell>
@@ -433,8 +478,12 @@ export default function SalariesPage() {
           if (!open) {
             setEditTeacher(null);
             setBasicSalary(0);
-            setGroupClassRate(0);
-            setOneToOneRate(0);
+            setGroup30MinRate(0);
+            setGroup45MinRate(0);
+            setGroup60MinRate(0);
+            setOneToOne30MinRate(0);
+            setOneToOne45MinRate(0);
+            setOneToOne60MinRate(0);
           }
           setConfigDialogOpen(open);
         }}>
@@ -464,31 +513,93 @@ export default function SalariesPage() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 items-center gap-4">
-                  <Label htmlFor="group-class-rate" className="text-left font-medium text-gray-700">Group Class Rate</Label>
-                  <div className="col-span-2 relative">
-                    <span className="absolute left-3 top-2.5 text-gray-400 text-sm">₹</span>
-                    <Input 
-                      id="group-class-rate" 
-                      type="number" 
-                      value={groupClassRate} 
-                      onChange={(e) => setGroupClassRate(parseFloat(e.target.value) || 0)} 
-                      className="pl-7 bg-white border border-gray-200"
-                    />
+                <div className="border-t pt-3 mt-3">
+                  <p className="text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2">Group Session Rates</p>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="group-30min" className="text-left text-xs font-medium text-gray-700">30 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="group-30min" 
+                          type="number" 
+                          value={group30MinRate} 
+                          onChange={(e) => setGroup30MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="group-45min" className="text-left text-xs font-medium text-gray-700">45 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="group-45min" 
+                          type="number" 
+                          value={group45MinRate} 
+                          onChange={(e) => setGroup45MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="group-60min" className="text-left text-xs font-medium text-gray-700">60 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="group-60min" 
+                          type="number" 
+                          value={group60MinRate} 
+                          onChange={(e) => setGroup60MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 items-center gap-4">
-                  <Label htmlFor="onetoone-rate" className="text-left font-medium text-gray-700">1-to-1 Session Rate</Label>
-                  <div className="col-span-2 relative">
-                    <span className="absolute left-3 top-2.5 text-gray-400 text-sm">₹</span>
-                    <Input 
-                      id="onetoone-rate" 
-                      type="number" 
-                      value={oneToOneRate} 
-                      onChange={(e) => setOneToOneRate(parseFloat(e.target.value) || 0)} 
-                      className="pl-7 bg-white border border-gray-200"
-                    />
+                <div className="border-t pt-3 mt-3">
+                  <p className="text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2">One-to-One Session Rates</p>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="oto-30min" className="text-left text-xs font-medium text-gray-700">30 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="oto-30min" 
+                          type="number" 
+                          value={oneToOne30MinRate} 
+                          onChange={(e) => setOneToOne30MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="oto-45min" className="text-left text-xs font-medium text-gray-700">45 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="oto-45min" 
+                          type="number" 
+                          value={oneToOne45MinRate} 
+                          onChange={(e) => setOneToOne45MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="oto-60min" className="text-left text-xs font-medium text-gray-700">60 Min Rate</Label>
+                      <div className="col-span-2 relative">
+                        <span className="absolute left-3 top-1.5 text-gray-400 text-xs">₹</span>
+                        <Input 
+                          id="oto-60min" 
+                          type="number" 
+                          value={oneToOne60MinRate} 
+                          onChange={(e) => setOneToOne60MinRate(parseFloat(e.target.value) || 0)} 
+                          className="pl-7 h-8 text-sm bg-white border border-gray-200"
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -581,43 +692,112 @@ export default function SalariesPage() {
                   </div>
                 </div>
 
-                <div>
-                  <Table className="border rounded-lg overflow-hidden">
-                    <TableHeader className="bg-gray-50">
-                      <TableRow>
-                        <TableHead>Earnings Category</TableHead>
-                        <TableHead className="text-center">Count / Rate</TableHead>
-                        <TableHead className="text-right">Amount</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow>
-                        <TableCell className="font-medium text-gray-800">Basic Salary (Fixed Monthly)</TableCell>
-                        <TableCell className="text-center text-gray-500">Fixed</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">₹{parseFloat(activeStatement.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell className="font-medium text-gray-800">Group Classes</TableCell>
-                        <TableCell className="text-center text-gray-500">{activeStatement.groupClassesCount} Completed × ₹{parseFloat(activeStatement.groupClassRate || "0")}</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">
-                          ₹{(activeStatement.groupClassesCount * parseFloat(activeStatement.groupClassRate || "0")).toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="border-b">
-                        <TableCell className="font-medium text-gray-800">One-to-One Sessions</TableCell>
-                        <TableCell className="text-center text-gray-500">{activeStatement.oneToOneCount} Sessions × ₹{parseFloat(activeStatement.oneToOneRate || "0")}</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">
-                          ₹{(activeStatement.oneToOneCount * parseFloat(activeStatement.oneToOneRate || "0")).toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="bg-gray-50/50">
-                        <TableCell colSpan={2} className="font-bold text-gray-900 text-base">Total Monthly Salary</TableCell>
-                        <TableCell className="text-right font-bold text-emerald-700 text-lg">
-                          ₹{parseFloat(activeStatement.totalAmount || "0").toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
+                <div className="space-y-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Group Sessions</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableHeader className="bg-gray-50">
+                        <TableRow>
+                          <TableHead className="text-xs">Session Type</TableHead>
+                          <TableHead className="text-center text-xs">Count</TableHead>
+                          <TableHead className="text-center text-xs">Rate</TableHead>
+                          <TableHead className="text-right text-xs">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 30 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group30MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group30MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group30MinCount || 0) * parseFloat(activeStatement.group30MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 45 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group45MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group45MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group45MinCount || 0) * parseFloat(activeStatement.group45MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-b">
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 60 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group60MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group60MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group60MinCount || 0) * parseFloat(activeStatement.group60MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">One-to-One Sessions</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableHeader className="bg-gray-50">
+                        <TableRow>
+                          <TableHead className="text-xs">Session Type</TableHead>
+                          <TableHead className="text-center text-xs">Count</TableHead>
+                          <TableHead className="text-center text-xs">Rate</TableHead>
+                          <TableHead className="text-right text-xs">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 30 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne30MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne30MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne30MinCount || 0) * parseFloat(activeStatement.oneToOne30MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 45 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne45MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne45MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne45MinCount || 0) * parseFloat(activeStatement.oneToOne45MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-b">
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 60 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne60MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne60MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne60MinCount || 0) * parseFloat(activeStatement.oneToOne60MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Final Calculation</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Basic Salary</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{parseFloat(activeStatement.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group Session Earnings</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">
+                            ₹{(
+                              (activeStatement.group30MinCount || 0) * parseFloat(activeStatement.group30MinRate || "0") +
+                              (activeStatement.group45MinCount || 0) * parseFloat(activeStatement.group45MinRate || "0") +
+                              (activeStatement.group60MinCount || 0) * parseFloat(activeStatement.group60MinRate || "0")
+                            ).toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One Session Earnings</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">
+                            ₹{(
+                              (activeStatement.oneToOne30MinCount || 0) * parseFloat(activeStatement.oneToOne30MinRate || "0") +
+                              (activeStatement.oneToOne45MinCount || 0) * parseFloat(activeStatement.oneToOne45MinRate || "0") +
+                              (activeStatement.oneToOne60MinCount || 0) * parseFloat(activeStatement.oneToOne60MinRate || "0")
+                            ).toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow className="bg-gray-50/50">
+                          <TableCell className="font-bold text-gray-900 text-sm py-1.5">Total Salary</TableCell>
+                          <TableCell className="text-right font-bold text-emerald-700 text-base py-1.5">
+                            ₹{parseFloat(activeStatement.totalAmount || "0").toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
                 </div>
 
                 {activeStatement.status === "paid" && (
@@ -686,11 +866,11 @@ export default function SalariesPage() {
                     <TableRow key={salary.id} className="hover:bg-gray-50/50">
                       <TableCell className="font-semibold text-emerald-700">{salary.month}</TableCell>
                       <TableCell>₹{parseFloat(salary.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
-                      <TableCell className="font-medium text-gray-600">
-                        {salary.groupClassesCount} <span className="text-xs text-gray-400">× ₹{parseFloat(salary.groupClassRate || "0")}</span>
+                      <TableCell className="font-medium text-gray-600 text-xs">
+                        {Number(salary.group30MinCount || 0) + Number(salary.group45MinCount || 0) + Number(salary.group60MinCount || 0)} Completed
                       </TableCell>
-                      <TableCell className="font-medium text-gray-600">
-                        {salary.oneToOneCount} <span className="text-xs text-gray-400">× ₹{parseFloat(salary.oneToOneRate || "0")}</span>
+                      <TableCell className="font-medium text-gray-600 text-xs">
+                        {Number(salary.oneToOne30MinCount || 0) + Number(salary.oneToOne45MinCount || 0) + Number(salary.oneToOne60MinCount || 0)} Sessions
                       </TableCell>
                       <TableCell className="font-bold text-gray-900">₹{parseFloat(salary.totalAmount || "0").toLocaleString("en-IN")}</TableCell>
                       <TableCell>
@@ -772,31 +952,113 @@ export default function SalariesPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      <TableRow>
-                        <TableCell className="font-medium text-gray-800">Basic Salary (Fixed Monthly)</TableCell>
-                        <TableCell className="text-center text-gray-500">Fixed</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">₹{parseFloat(activeStatement.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell className="font-medium text-gray-800">Group Classes</TableCell>
-                        <TableCell className="text-center text-gray-500">{activeStatement.groupClassesCount} Completed × ₹{parseFloat(activeStatement.groupClassRate || "0")}</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">
-                          ₹{(activeStatement.groupClassesCount * parseFloat(activeStatement.groupClassRate || "0")).toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="border-b">
-                        <TableCell className="font-medium text-gray-800">One-to-One Sessions</TableCell>
-                        <TableCell className="text-center text-gray-500">{activeStatement.oneToOneCount} Sessions × ₹{parseFloat(activeStatement.oneToOneRate || "0")}</TableCell>
-                        <TableCell className="text-right font-medium text-gray-800">
-                          ₹{(activeStatement.oneToOneCount * parseFloat(activeStatement.oneToOneRate || "0")).toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
-                      <TableRow className="bg-gray-50/50">
-                        <TableCell colSpan={2} className="font-bold text-gray-900 text-base">Total Monthly Salary</TableCell>
-                        <TableCell className="text-right font-bold text-emerald-700 text-lg">
-                          ₹{parseFloat(activeStatement.totalAmount || "0").toLocaleString("en-IN")}
-                        </TableCell>
-                      </TableRow>
+                <div className="space-y-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Group Sessions</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableHeader className="bg-gray-50">
+                        <TableRow>
+                          <TableHead className="text-xs">Session Type</TableHead>
+                          <TableHead className="text-center text-xs">Count</TableHead>
+                          <TableHead className="text-center text-xs">Rate</TableHead>
+                          <TableHead className="text-right text-xs">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 30 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group30MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group30MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group30MinCount || 0) * parseFloat(activeStatement.group30MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 45 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group45MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group45MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group45MinCount || 0) * parseFloat(activeStatement.group45MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-b">
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group 60 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.group60MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.group60MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.group60MinCount || 0) * parseFloat(activeStatement.group60MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">One-to-One Sessions</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableHeader className="bg-gray-50">
+                        <TableRow>
+                          <TableHead className="text-xs">Session Type</TableHead>
+                          <TableHead className="text-center text-xs">Count</TableHead>
+                          <TableHead className="text-center text-xs">Rate</TableHead>
+                          <TableHead className="text-right text-xs">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 30 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne30MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne30MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne30MinCount || 0) * parseFloat(activeStatement.oneToOne30MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 45 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne45MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne45MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne45MinCount || 0) * parseFloat(activeStatement.oneToOne45MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-b">
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One 60 Min</TableCell>
+                          <TableCell className="text-center text-gray-600 py-1 text-xs">{activeStatement.oneToOne60MinCount || 0}</TableCell>
+                          <TableCell className="text-center text-gray-500 py-1 text-xs">₹{parseFloat(activeStatement.oneToOne60MinRate || "0").toLocaleString("en-IN")}</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{((activeStatement.oneToOne60MinCount || 0) * parseFloat(activeStatement.oneToOne60MinRate || "0")).toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Final Calculation</h4>
+                    <Table className="border rounded-lg overflow-hidden">
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Basic Salary</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">₹{parseFloat(activeStatement.basicSalary || "0").toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">Group Session Earnings</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">
+                            ₹{(
+                              (activeStatement.group30MinCount || 0) * parseFloat(activeStatement.group30MinRate || "0") +
+                              (activeStatement.group45MinCount || 0) * parseFloat(activeStatement.group45MinRate || "0") +
+                              (activeStatement.group60MinCount || 0) * parseFloat(activeStatement.group60MinRate || "0")
+                            ).toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell className="font-medium text-gray-800 py-1 text-xs">One-to-One Session Earnings</TableCell>
+                          <TableCell className="text-right font-medium text-gray-800 py-1 text-xs">
+                            ₹{(
+                              (activeStatement.oneToOne30MinCount || 0) * parseFloat(activeStatement.oneToOne30MinRate || "0") +
+                              (activeStatement.oneToOne45MinCount || 0) * parseFloat(activeStatement.oneToOne45MinRate || "0") +
+                              (activeStatement.oneToOne60MinCount || 0) * parseFloat(activeStatement.oneToOne60MinRate || "0")
+                            ).toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow className="bg-gray-50/50">
+                          <TableCell className="font-bold text-gray-900 text-sm py-1.5">Total Salary</TableCell>
+                          <TableCell className="text-right font-bold text-emerald-700 text-base py-1.5">
+                            ₹{parseFloat(activeStatement.totalAmount || "0").toLocaleString("en-IN")}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
                     </TableBody>
                   </Table>
                 </div>
