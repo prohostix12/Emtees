@@ -8,6 +8,9 @@ import { env } from "../lib/env";
 import { flexibilityRequests, feedback, notifications, payments, profiles, users, batchEnrollments, batches, classes, oneToOneSessions, systemSettings, classBatches } from "@db/schema";
 import { sendNotification, sendBulkNotification } from "../lib/notificationEngine";
 import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
+import { recalculateStudentFees } from "../lib/feeHelper";
+import { EnrollmentPaymentService } from "../lib/EnrollmentPaymentService";
+
 
 export const studentRouter = createRouter({
   myPayments: authedQuery.query(async ({ ctx }) => {
@@ -667,6 +670,8 @@ export const studentRouter = createRouter({
             activityTimeline: timeline,
           })
           .where(eq(profiles.userId, ctx.user.id));
+
+        await recalculateStudentFees(ctx.user.id);
       }
 
       // Reactivate student status and batch enrollments
@@ -703,7 +708,11 @@ export const studentRouter = createRouter({
     }),
 
   createEnrollmentOrder: authedQuery
-    .input(z.object({ batchId: z.number() }))
+    .input(z.object({
+      batchId: z.number(),
+      paymentOption: z.enum(["full_payment", "installment"]).default("full_payment"),
+      downPayment: z.number().optional(),
+    }))
     .mutation(async ({ input, ctx }) => {
       const db = getDb();
       // Check if student is already enrolled in this batch
@@ -720,13 +729,33 @@ export const studentRouter = createRouter({
 
       const batch = await db.query.batches.findFirst({
         where: eq(batches.id, input.batchId),
+        with: { module: true },
       });
       if (!batch) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
       }
 
-      const fee = parseFloat(batch.courseFee ?? "0");
-      const amountInPaise = Math.round(fee * 100);
+      const moduleRecord = batch.module;
+      if (!moduleRecord) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Module not found for this batch" });
+      }
+
+      const totalCourseFee = parseFloat(moduleRecord.courseFee ?? "0");
+      const minDownPayment = parseFloat(moduleRecord.minimumDownPayment ?? "0");
+
+      let amountToPay = totalCourseFee;
+      if (input.paymentOption === "installment") {
+        const dp = input.downPayment !== undefined ? input.downPayment : minDownPayment;
+        if (dp < minDownPayment) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Down payment must be at least ₹${minDownPayment.toLocaleString()}`,
+          });
+        }
+        amountToPay = dp;
+      }
+
+      const amountInPaise = Math.round(amountToPay * 100);
 
       const isMockKey = env.razorpayKeyId.includes("mock") || env.razorpayKeyId === "";
       let orderId = `order_mock_${Math.random().toString(36).substring(2, 15)}`;
@@ -742,7 +771,7 @@ export const studentRouter = createRouter({
             body: JSON.stringify({
               amount: amountInPaise,
               currency: "INR",
-              receipt: `rcpt_enroll_${ctx.user.id}_${input.batchId}_${Date.now()}`,
+              receipt: EnrollmentPaymentService.generateReceiptNumber(ctx.user.id, input.batchId),
             }),
           });
           if (response.ok) {
@@ -772,6 +801,7 @@ export const studentRouter = createRouter({
       razorpay_order_id: z.string(),
       razorpay_signature: z.string(),
       amount: z.number(),
+      paymentOption: z.enum(["full_payment", "installment"]).default("full_payment"),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = getDb();
@@ -788,106 +818,70 @@ export const studentRouter = createRouter({
         }
       }
 
-      // Check duplicate enrollment
-      const existing = await db.query.batchEnrollments.findFirst({
-        where: and(
-          eq(batchEnrollments.batchId, input.batchId),
-          eq(batchEnrollments.studentId, ctx.user.id),
-          eq(batchEnrollments.status, "active")
-        ),
-      });
-      if (existing) {
-        throw new TRPCError({ code: "CONFLICT", message: "You are already enrolled in this batch" });
-      }
-
-      // Record payment
-      const [paymentRecord] = await db.insert(payments).values({
-        studentId: ctx.user.id,
-        amount: String(input.amount),
-        type: "tuition",
-        status: "paid",
-        paidAt: new Date(),
-        transactionId: input.razorpay_payment_id,
-        batchId: input.batchId,
-        notes: `Enrolled in batch: ${input.batchId} via Razorpay`,
-      }).returning();
-
-      // Create enrollment record
-      await db.insert(batchEnrollments).values({
-        batchId: input.batchId,
-        studentId: ctx.user.id,
-        status: "active",
-      });
-
-      // Update student profile with enrolled batch and course info
-      const batch = await db.query.batches.findFirst({
-        where: eq(batches.id, input.batchId),
-        with: { module: true },
-      });
-
-      if (batch) {
-        const existingProfile = await db.query.profiles.findFirst({
-          where: eq(profiles.userId, ctx.user.id),
+      return await db.transaction(async (tx) => {
+        const batch = await tx.query.batches.findFirst({
+          where: eq(batches.id, input.batchId),
+          with: { module: true },
         });
-
-        const timeline = [{
-          type: "enrollment_payment",
-          amount: input.amount,
-          timestamp: new Date().toISOString(),
-        }];
-
-        if (existingProfile) {
-          await db.update(profiles)
-            .set({
-              batch: batch.name,
-              batchTime: batch.timeSlot,
-              course: batch.module?.name || null,
-              feesTotal: String(input.amount),
-              feesPaid: String(input.amount),
-              feesBalance: "0",
-              paymentStatus: "paid",
-              activityTimeline: timeline,
-            })
-            .where(eq(profiles.userId, ctx.user.id));
-        } else {
-          const nextEnrollmentId = await generateNextEnrollmentId();
-          await db.insert(profiles).values({
-            userId: ctx.user.id,
-            enrollmentId: nextEnrollmentId,
-            batch: batch.name,
-            batchTime: batch.timeSlot,
-            course: batch.module?.name || null,
-            feesTotal: String(input.amount),
-            feesPaid: String(input.amount),
-            feesBalance: "0",
-            paymentStatus: "paid",
-            activityTimeline: timeline,
-          });
+        if (!batch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
         }
 
-        // Send notification
-        await db.insert(notifications).values({
-          userId: ctx.user.id,
-          title: "Enrollment Successful",
-          message: `You have successfully enrolled in batch "${batch.name}"!`,
-          type: "enrollment_success",
+        const moduleRecord = batch.module;
+        if (!moduleRecord) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Module not found for this batch" });
+        }
+
+        const totalCourseFee = parseFloat(moduleRecord.courseFee ?? "0");
+        const paidAmount = input.amount;
+        const remainingBalance = Math.max(0, totalCourseFee - paidAmount);
+        
+        let paymentStatus: "paid" | "partial" | "unpaid" = "unpaid";
+        if (remainingBalance <= 0) {
+          paymentStatus = "paid";
+        } else if (paidAmount > 0) {
+          paymentStatus = "partial";
+        }
+
+        try {
+          await EnrollmentPaymentService.processEnrollment(tx, {
+            studentId: ctx.user.id,
+            batchId: input.batchId,
+            moduleId: batch.moduleId,
+            totalCourseFee,
+            paymentOption: input.paymentOption,
+            paidAmount,
+            remainingBalance,
+            paymentStatus,
+            registrationSource: "self",
+            razorpayPaymentId: input.razorpay_payment_id,
+          });
+        } catch (err: any) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message || "Failed to process enrollment" });
+        }
+
+        const paymentRecord = await tx.query.payments.findFirst({
+          where: and(
+            eq(payments.studentId, ctx.user.id),
+            eq(payments.batchId, input.batchId),
+            eq(payments.transactionId, input.razorpay_payment_id)
+          ),
         });
-      }
 
-      const studentUser = await db.query.users.findFirst({
-        where: eq(users.id, ctx.user.id),
+        const studentUser = await tx.query.users.findFirst({
+          where: eq(users.id, ctx.user.id),
+        });
+
+        const receipt = EnrollmentPaymentService.generateReceipt(
+          paymentRecord || { id: 0, amount: String(paidAmount), paidAt: new Date(), transactionId: input.razorpay_payment_id },
+          studentUser,
+          moduleRecord.name
+        );
+
+        return {
+          success: true,
+          payment: receipt,
+        };
       });
-
-      return {
-        success: true,
-        payment: {
-          id: paymentRecord?.id,
-          amount: paymentRecord?.amount,
-          paidAt: paymentRecord?.paidAt,
-          transactionId: paymentRecord?.transactionId,
-          student: studentUser ? { name: studentUser.name, unionId: studentUser.unionId } : null,
-          courseName: batch?.module?.name || "Course",
-        },
-      };
     }),
 });

@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Search, Plus, RefreshCw, Key, ToggleLeft, ToggleRight, Copy, Edit, MoreVertical, GraduationCap, BarChart3, Coins, Users } from "lucide-react";
+import { Search, Plus, RefreshCw, Key, ToggleLeft, ToggleRight, Copy, Edit, MoreVertical, GraduationCap, BarChart3, Coins, Users, Trash2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { PhoneNumberInput } from "@/components/PhoneNumberInput";
 
@@ -44,6 +44,9 @@ export default function SalesExecutivesAdminPage() {
 
   const [salaryModalOpen, setSalaryModalOpen] = useState(false);
   const [selectedExecForSalary, setSelectedExecForSalary] = useState<any>(null);
+
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [selectedExecForDelete, setSelectedExecForDelete] = useState<any>(null);
 
   // Form states
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -126,6 +129,18 @@ export default function SalesExecutivesAdminPage() {
     },
     onError: (err) => {
       toast.error(err.message);
+    },
+  });
+
+  const deleteMutation = trpc.salesExecutive.deleteExecutive.useMutation({
+    onSuccess: () => {
+      toast.success("Sales Executive deleted successfully");
+      setDeleteConfirmOpen(false);
+      setSelectedExecForDelete(null);
+      execsQuery.refetch();
+    },
+    onError: (err) => {
+      toast.error(err.message || "Failed to delete sales executive");
     },
   });
 
@@ -368,6 +383,17 @@ export default function SalesExecutivesAdminPage() {
                                   Activate Account
                                 </>
                               )}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem 
+                              onClick={() => {
+                                setSelectedExecForDelete(exec);
+                                setDeleteConfirmOpen(true);
+                              }}
+                              className="flex items-center gap-2 cursor-pointer py-1.5 font-medium text-red-600"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Delete Executive
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -697,6 +723,53 @@ export default function SalesExecutivesAdminPage() {
 
           <DialogFooter>
             <Button type="button" onClick={() => setSalaryModalOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Modal */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent className="max-w-md bg-white">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-gray-900">Delete Sales Executive</DialogTitle>
+            <DialogDescription className="text-sm text-gray-500 mt-2">
+              Are you sure you want to delete this Sales Executive? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            {selectedExecForDelete && (
+              <div className="bg-red-50/50 border border-red-100/50 rounded-lg p-3 space-y-1">
+                <div className="text-xs text-red-800 font-semibold">Sales Executive Details:</div>
+                <div className="text-xs text-gray-600"><span className="font-medium text-gray-800">Name:</span> {selectedExecForDelete.name}</div>
+                <div className="text-xs text-gray-600"><span className="font-medium text-gray-800">Employee ID:</span> {selectedExecForDelete.employeeId}</div>
+                <div className="text-xs text-gray-600"><span className="font-medium text-gray-800">Referral Code:</span> {selectedExecForDelete.referralCode}</div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setDeleteConfirmOpen(false);
+                setSelectedExecForDelete(null);
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                if (selectedExecForDelete) {
+                  deleteMutation.mutate({ id: selectedExecForDelete.id });
+                }
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "Deleting..." : "Delete"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

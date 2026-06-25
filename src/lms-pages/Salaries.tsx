@@ -667,6 +667,8 @@ export default function SalariesPage() {
         {activeStatement && (
           <Dialog open={statementDialogOpen} onOpenChange={setStatementDialogOpen}>
             <DialogContent className="max-w-2xl bg-white rounded-xl shadow-xl border p-0 overflow-hidden">
+              <DialogTitle className="sr-only">Salary Statement - {activeStatement.month}</DialogTitle>
+              <DialogDescription className="sr-only">Detailed breakdown of monthly earnings and sessions.</DialogDescription>
               <div className="p-6 md:p-8 space-y-6" id="printable-statement">
                 <div className="flex justify-between items-start border-b border-gray-100 pb-5">
                   <div>
@@ -917,6 +919,8 @@ export default function SalariesPage() {
         {activeStatement && (
           <Dialog open={statementDialogOpen} onOpenChange={setStatementDialogOpen}>
             <DialogContent className="max-w-2xl bg-white rounded-xl shadow-xl border p-0 overflow-hidden">
+              <DialogTitle className="sr-only">Salary Statement - {activeStatement.month}</DialogTitle>
+              <DialogDescription className="sr-only">Detailed breakdown of monthly earnings and sessions.</DialogDescription>
               <div className="p-6 md:p-8 space-y-6">
                 <div className="flex justify-between items-start border-b border-gray-100 pb-5">
                   <div>
@@ -942,16 +946,6 @@ export default function SalariesPage() {
                   </div>
                 </div>
 
-                <div>
-                  <Table className="border rounded-lg overflow-hidden">
-                    <TableHeader className="bg-gray-50">
-                      <TableRow>
-                        <TableHead>Earnings Category</TableHead>
-                        <TableHead className="text-center">Count / Rate</TableHead>
-                        <TableHead className="text-right">Amount</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
                 <div className="space-y-4">
                   <div>
                     <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Group Sessions</h4>
@@ -1058,9 +1052,6 @@ export default function SalariesPage() {
                       </TableBody>
                     </Table>
                   </div>
-                </div>
-                    </TableBody>
-                  </Table>
                 </div>
 
                 {activeStatement.status === "paid" && (

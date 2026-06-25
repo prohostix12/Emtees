@@ -23,9 +23,12 @@ import {
   modules,
   systemSettings,
   sessionAllocationLogs,
+  studentIdSequence,
+  studentClassAllocations,
 } from "@db/schema";
 import { sendNotification } from "../lib/notificationEngine";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
+import { recalculateStudentFees } from "../lib/feeHelper";
 
 export function getDurationCategory(duration: number): 30 | 45 | 60 | null {
   if (duration >= 50 && duration <= 70) return 60;
@@ -460,6 +463,9 @@ export async function recalculateSalaryInternal(
     sql`TO_CHAR(${oneToOneSessions.scheduledAt}, 'YYYY-MM') = ${month}`
   ));
 
+  // 2b. Fetch completed new flow class sessions for this teacher in the month (deprecated)
+  const newClassSessionsList: any[] = [];
+
   // 3. Count categories
   let group30Count = 0;
   let group45Count = 0;
@@ -479,6 +485,19 @@ export async function recalculateSalaryInternal(
     if (cat === 30) oneToOne30Count++;
     else if (cat === 45) oneToOne45Count++;
     else if (cat === 60) oneToOne60Count++;
+  }
+
+  for (const sess of newClassSessionsList) {
+    const cat = getDurationCategory(sess.duration || 0);
+    if (sess.sessionType === "group") {
+      if (cat === 30) group30Count++;
+      else if (cat === 45) group45Count++;
+      else if (cat === 60) group60Count++;
+    } else {
+      if (cat === 30) oneToOne30Count++;
+      else if (cat === 45) oneToOne45Count++;
+      else if (cat === 60) oneToOne60Count++;
+    }
   }
 
   // 4. Fetch salary configuration
@@ -546,6 +565,9 @@ export async function recalculateSalaryInternal(
       .set(salaryValues)
       .where(eq(teacherSalaries.id, existing.id));
     return db.query.teacherSalaries.findFirst({ where: eq(teacherSalaries.id, existing.id) });
+  } else if (forceInsert) {
+    const inserted = await db.insert(teacherSalaries).values(salaryValues).returning({ id: teacherSalaries.id });
+    return db.query.teacherSalaries.findFirst({ where: eq(teacherSalaries.id, inserted[0].id) });
   }
   return null;
 }
@@ -1133,6 +1155,8 @@ export const adminRouter = createRouter({
             activityTimeline: timeline,
           })
           .where(eq(profiles.userId, payment.studentId));
+
+        await recalculateStudentFees(payment.studentId);
       }
 
       return { success: true };
@@ -1164,6 +1188,7 @@ export const adminRouter = createRouter({
       paymentStatus: o.paymentStatus,
       paymentDueDate: o.paymentDueDate,
       gracePeriodDays: o.gracePeriodDays,
+      enrollmentId: o.enrollmentId,
     }));
   }),
 
@@ -1218,8 +1243,12 @@ export const adminRouter = createRouter({
           gracePeriodDays,
           paymentStatus: nextPaymentStatus,
           activityTimeline: timeline,
+          totalCourseFee: feesTotal,
+          remainingBalance: feesBalance,
         })
         .where(eq(profiles.userId, input.studentId));
+
+      await recalculateStudentFees(input.studentId);
 
       // Reactivate student if fees are fully cleared
       if (parseFloat(feesBalance) <= 0) {
@@ -1233,6 +1262,242 @@ export const adminRouter = createRouter({
         await db.update(users)
           .set({ status: "active" })
           .where(eq(users.id, input.studentId));
+      }
+
+      return { success: true };
+    }),
+
+  updateStudentFeeRules: adminQuery
+    .input(z.object({
+      studentId: z.number(),
+      paymentType: z.enum(["FULL_PAYMENT", "INSTALLMENT"]),
+      totalCourseFee: z.number(),
+      initialPayment: z.number().optional().nullable(),
+      installments: z.array(z.object({
+        installmentNumber: z.number(),
+        amount: z.number(),
+        dueDate: z.date().optional().nullable(),
+        status: z.enum(["paid", "unpaid"]),
+      })),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      if (ctx.user.role === "academic_head") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Access Denied" });
+      }
+      const db = getDb();
+      const studentId = input.studentId;
+
+      // 1. Fetch student profile and active enrollment
+      const profile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, studentId),
+      });
+      if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Student profile not found" });
+
+      const activeEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.studentId, studentId),
+          eq(batchEnrollments.status, "active")
+        ),
+      });
+
+      // 2. Fetch existing paid tuition payments
+      const existingPaidPayments = await db.query.payments.findMany({
+        where: and(
+          eq(payments.studentId, studentId),
+          eq(payments.status, "paid"),
+          eq(payments.type, "tuition")
+        ),
+      });
+
+      const sumPaid = existingPaidPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+
+      // Validate: Total fee cannot be less than already paid amount
+      if (input.totalCourseFee < sumPaid) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Total Course Fee (₹${input.totalCourseFee}) cannot be less than the amount already paid (₹${sumPaid}).`,
+        });
+      }
+
+      const inputPaid = input.installments.filter((inst) => inst.status === "paid");
+      const inputUnpaid = input.installments.filter((inst) => inst.status === "unpaid");
+
+      // Validate: Paid installments count cannot differ from database
+      if (existingPaidPayments.length !== inputPaid.length) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Paid installments count mismatch. Expected ${existingPaidPayments.length} paid installments, but input has ${inputPaid.length}.`,
+        });
+      }
+
+      // Check if amounts match (sort DB paid by creation date, input paid by installment number)
+      const sortedDbPaid = [...existingPaidPayments].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      const sortedInputPaid = [...inputPaid].sort((a, b) => a.installmentNumber - b.installmentNumber);
+      for (let i = 0; i < sortedDbPaid.length; i++) {
+        if (Math.abs(parseFloat(sortedDbPaid[i].amount) - sortedInputPaid[i].amount) > 0.01) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Amount for paid installment #${sortedInputPaid[i].installmentNumber} (₹${sortedInputPaid[i].amount}) does not match paid record in database (₹${parseFloat(sortedDbPaid[i].amount)}).`,
+          });
+        }
+      }
+
+      // Validate: Sum of all installments equals the total fee
+      const sumInputPaid = inputPaid.reduce((sum, inst) => sum + inst.amount, 0);
+      const sumInputUnpaid = inputUnpaid.reduce((sum, inst) => sum + inst.amount, 0);
+      const sumAllInstallments = sumInputPaid + sumInputUnpaid;
+
+      if (Math.abs(sumAllInstallments - input.totalCourseFee) > 0.01) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Sum of all installments (₹${sumAllInstallments}) must equal the total course fee (₹${input.totalCourseFee}).`,
+        });
+      }
+
+      // Validate: Initial payment cannot exceed total fee
+      if (input.initialPayment && input.initialPayment > input.totalCourseFee) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Initial payment cannot exceed the total course fee.",
+        });
+      }
+
+      // Validate: Installment due dates cannot overlap/duplicate
+      const dueDates = input.installments
+        .map((inst) => inst.dueDate)
+        .filter((date): date is Date => !!date);
+      const uniqueDueDates = new Set(dueDates.map((d) => new Date(d).toDateString()));
+      if (uniqueDueDates.size !== dueDates.length) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Installment due dates cannot overlap.",
+        });
+      }
+
+      // Validate: installmentNumber uniqueness in the input
+      const installmentNumbers = input.installments.map((inst) => inst.installmentNumber);
+      if (new Set(installmentNumbers).size !== installmentNumbers.length) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Installment numbers must be unique.",
+        });
+      }
+
+      // Perform updates in a transaction
+      await db.transaction(async (tx) => {
+        // 1. Update batch enrollment if exists
+        if (activeEnrollment) {
+          await tx.update(batchEnrollments)
+            .set({
+              paymentType: input.paymentType,
+            })
+            .where(eq(batchEnrollments.id, activeEnrollment.id));
+        }
+
+        // 2. Delete all existing unpaid tuition payments
+        await tx.delete(payments)
+          .where(and(
+            eq(payments.studentId, studentId),
+            eq(payments.status, "unpaid"),
+            eq(payments.type, "tuition")
+          ));
+
+        // 3. Insert new unpaid payments/installments
+        let paymentDueDate: Date | null = null;
+        if (input.paymentType === "INSTALLMENT") {
+          for (const inst of inputUnpaid) {
+            await tx.insert(payments).values({
+              studentId,
+              amount: String(inst.amount),
+              type: "tuition",
+              status: "unpaid",
+              dueDate: inst.dueDate ? new Date(inst.dueDate) : null,
+              installmentNumber: inst.installmentNumber,
+              batchId: activeEnrollment?.batchId || null,
+              notes: `Installment #${inst.installmentNumber} (configured)`,
+            });
+          }
+
+          // Next due date is the earliest unpaid installment's due date
+          const unpaidWithDates = inputUnpaid.filter((inst) => !!inst.dueDate);
+          if (unpaidWithDates.length > 0) {
+            const sortedUnpaid = [...unpaidWithDates].sort((a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime());
+            paymentDueDate = sortedUnpaid[0].dueDate!;
+          }
+        } else {
+          // Full payment
+          const unpaidAmount = input.totalCourseFee - sumPaid;
+          if (unpaidAmount > 0) {
+            // Find earliest due date if specified in input installments, or default to profile's due date / today
+            paymentDueDate = input.installments.find((inst) => inst.status === "unpaid")?.dueDate || profile.paymentDueDate || new Date();
+
+            await tx.insert(payments).values({
+              studentId,
+              amount: String(unpaidAmount),
+              type: "tuition",
+              status: "unpaid",
+              dueDate: paymentDueDate,
+              installmentNumber: null,
+              batchId: activeEnrollment?.batchId || null,
+              notes: `Unpaid balance (Full Payment)`,
+            });
+          }
+        }
+
+        // 4. Update student profile
+        const feesTotal = String(input.totalCourseFee);
+        const feesPaid = String(sumPaid);
+        const feesBalance = String(input.totalCourseFee - sumPaid);
+        const nextPaymentStatus = (input.totalCourseFee - sumPaid <= 0) ? "paid" : (sumPaid > 0 ? "partial" : "unpaid");
+
+        const minInitialPayment = input.initialPayment !== undefined ? String(input.initialPayment) : profile.minInitialPayment;
+        const downPayment = input.initialPayment !== undefined ? String(input.initialPayment) : profile.downPayment;
+
+        const timeline = Array.isArray(profile.activityTimeline) ? profile.activityTimeline : [];
+        timeline.push({
+          type: "fee_rules_configuration",
+          paymentType: input.paymentType,
+          totalCourseFee: input.totalCourseFee,
+          initialPayment: input.initialPayment,
+          outstandingBalance: input.totalCourseFee - sumPaid,
+          timestamp: new Date().toISOString(),
+        });
+
+        await tx.update(profiles)
+          .set({
+            feesTotal,
+            feesPaid,
+            feesBalance,
+            minInitialPayment,
+            downPayment,
+            paymentStatus: nextPaymentStatus,
+            paymentOption: input.paymentType === "INSTALLMENT" ? "installment" : "full_payment",
+            paymentDueDate,
+            activityTimeline: timeline,
+            totalCourseFee: feesTotal,
+            remainingBalance: feesBalance,
+          })
+          .where(eq(profiles.userId, studentId));
+      });
+
+      // Recalculate student fees
+      await recalculateStudentFees(studentId);
+
+      // Reactivate user if fees are fully cleared
+      const finalProfile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, studentId),
+      });
+      if (finalProfile && parseFloat(finalProfile.feesBalance ?? "0") <= 0) {
+        await db.update(batchEnrollments)
+          .set({ status: "active" })
+          .where(and(
+            eq(batchEnrollments.studentId, studentId),
+            eq(batchEnrollments.status, "restricted")
+          ));
+
+        await db.update(users)
+          .set({ status: "active" })
+          .where(eq(users.id, studentId));
       }
 
       return { success: true };
@@ -1350,7 +1615,7 @@ export const adminRouter = createRouter({
       const list = await db.query.flexibilityRequests.findMany({
         where,
         orderBy: desc(flexibilityRequests.requestedAt),
-        with: { student: true, fromBatch: true, toBatch: true, resolver: true },
+        with: { student: { with: { profile: true } }, fromBatch: true, toBatch: true, resolver: true },
       });
 
       return list.map((req) => {
@@ -1940,6 +2205,107 @@ export const adminRouter = createRouter({
       await upsertSetting("feedback_limit_per_batch", String(input.feedback_limit_per_batch));
       await upsertSetting("feedback_teacher_stats_enabled", String(input.feedback_teacher_stats_enabled));
       
+      return { success: true };
+    }),
+
+  getStudentIdConfig: adminQuery
+    .query(async () => {
+      const db = getDb();
+      const activePrefixRow = await db.query.systemSettings.findFirst({
+        where: eq(systemSettings.key, "active_student_id_prefix"),
+      });
+      const activePrefix = activePrefixRow?.value || "STU";
+
+      const seq = await db.query.studentIdSequence.findFirst({
+        where: eq(studentIdSequence.prefix, activePrefix),
+      });
+
+      return {
+        prefix: activePrefix,
+        startingNumber: seq ? seq.lastNumber + 1 : 1,
+        numberLength: seq ? seq.numberLength : 4,
+      };
+    }),
+
+  updateStudentIdConfig: adminQuery
+    .input(z.object({
+      prefix: z.string().min(1).max(50),
+      startingNumber: z.number().int().nonnegative(),
+      numberLength: z.number().int().nonnegative(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+
+      // Upsert prefix key in systemSettings
+      const existingPrefix = await db.query.systemSettings.findFirst({
+        where: eq(systemSettings.key, "active_student_id_prefix"),
+      });
+      if (existingPrefix) {
+        await db.update(systemSettings)
+          .set({ value: input.prefix, updatedAt: new Date() })
+          .where(eq(systemSettings.key, "active_student_id_prefix"));
+      } else {
+        await db.insert(systemSettings).values({ key: "active_student_id_prefix", value: input.prefix });
+      }
+
+      // Upsert in studentIdSequence table
+      const seq = await db.query.studentIdSequence.findFirst({
+        where: eq(studentIdSequence.prefix, input.prefix),
+      });
+      if (seq) {
+        await db.update(studentIdSequence)
+          .set({
+            lastNumber: input.startingNumber - 1,
+            numberLength: input.numberLength,
+          })
+          .where(eq(studentIdSequence.prefix, input.prefix));
+      } else {
+        await db.insert(studentIdSequence).values({
+          prefix: input.prefix,
+          lastNumber: input.startingNumber - 1,
+          numberLength: input.numberLength,
+        });
+      }
+
+      return { success: true };
+    }),
+
+  getDefaultCountry: adminQuery
+    .query(async () => {
+      const db = getDb();
+      const codeRow = await db.query.systemSettings.findFirst({
+        where: eq(systemSettings.key, "default_country_code"),
+      });
+      const isoRow = await db.query.systemSettings.findFirst({
+        where: eq(systemSettings.key, "default_country_iso"),
+      });
+      return {
+        code: codeRow?.value || "+91",
+        iso: isoRow?.value || "IN",
+      };
+    }),
+
+  updateDefaultCountry: adminQuery
+    .input(z.object({
+      code: z.string(),
+      iso: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const upsert = async (key: string, value: string) => {
+        const existing = await db.query.systemSettings.findFirst({
+          where: eq(systemSettings.key, key),
+        });
+        if (existing) {
+          await db.update(systemSettings)
+            .set({ value, updatedAt: new Date() })
+            .where(eq(systemSettings.key, key));
+        } else {
+          await db.insert(systemSettings).values({ key, value });
+        }
+      };
+      await upsert("default_country_code", input.code);
+      await upsert("default_country_iso", input.iso);
       return { success: true };
     }),
 
@@ -2634,6 +3000,100 @@ export const adminRouter = createRouter({
       const remainingGroup = input.allocatedGroup - attendedGroup;
       const totalRemaining = remainingOneToOne + remainingGroup;
 
+      const activeEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.studentId, input.studentId),
+          eq(batchEnrollments.status, "active")
+        )
+      });
+      if (!activeEnrollment) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Active enrollment not found for student." });
+      }
+
+      const currentAlloc = {
+        oneToOne: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          sessions30: activeEnrollment.oneOnOne30Allocated,
+          sessions45: activeEnrollment.oneOnOne45Allocated,
+          sessions60: activeEnrollment.oneOnOne60Allocated,
+          completed30: activeEnrollment.oneOnOne30Used,
+          completed45: activeEnrollment.oneOnOne45Used,
+          completed60: activeEnrollment.oneOnOne60Used,
+        },
+        group: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[1] || (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          batchId: activeEnrollment.batchId,
+          sessions30: activeEnrollment.group30Allocated,
+          sessions45: activeEnrollment.group45Allocated,
+          sessions60: activeEnrollment.group60Allocated,
+          completed30: activeEnrollment.group30Used,
+          completed45: activeEnrollment.group45Used,
+          completed60: activeEnrollment.group60Used,
+        }
+      };
+
+      const adjustDurationCounts = (current30: number, current45: number, current60: number, completed30: number, completed45: number, completed60: number, targetTotal: number) => {
+        const currentTotal = current30 + current45 + current60;
+        const diff = targetTotal - currentTotal;
+        if (diff >= 0) {
+          return {
+            sessions30: current30 + diff,
+            sessions45: current45,
+            sessions60: current60
+          };
+        } else {
+          let toReduce = Math.abs(diff);
+          let new30 = current30;
+          let new45 = current45;
+          let new60 = current60;
+
+          const maxReduce30 = Math.max(0, new30 - completed30);
+          const reduce30 = Math.min(toReduce, maxReduce30);
+          new30 -= reduce30;
+          toReduce -= reduce30;
+
+          if (toReduce > 0) {
+            const maxReduce45 = Math.max(0, new45 - completed45);
+            const reduce45 = Math.min(toReduce, maxReduce45);
+            new45 -= reduce45;
+            toReduce -= reduce45;
+          }
+
+          if (toReduce > 0) {
+            const maxReduce60 = Math.max(0, new60 - completed60);
+            const reduce60 = Math.min(toReduce, maxReduce60);
+            new60 -= reduce60;
+            toReduce -= reduce60;
+          }
+
+          return {
+            sessions30: new30,
+            sessions45: new45,
+            sessions60: new60
+          };
+        }
+      };
+
+      const otoRes = adjustDurationCounts(
+        currentAlloc.oneToOne?.sessions30 || 0,
+        currentAlloc.oneToOne?.sessions45 || 0,
+        currentAlloc.oneToOne?.sessions60 || 0,
+        currentAlloc.oneToOne?.completed30 || 0,
+        currentAlloc.oneToOne?.completed45 || 0,
+        currentAlloc.oneToOne?.completed60 || 0,
+        input.allocatedOneToOne
+      );
+
+      const grpRes = adjustDurationCounts(
+        currentAlloc.group?.sessions30 || 0,
+        currentAlloc.group?.sessions45 || 0,
+        currentAlloc.group?.sessions60 || 0,
+        currentAlloc.group?.completed30 || 0,
+        currentAlloc.group?.completed45 || 0,
+        currentAlloc.group?.completed60 || 0,
+        input.allocatedGroup
+      );
+
       await db.transaction(async (tx) => {
         await tx.update(profiles)
           .set({
@@ -2647,6 +3107,17 @@ export const adminRouter = createRouter({
           })
           .where(eq(profiles.userId, input.studentId));
 
+        await tx.update(batchEnrollments)
+          .set({
+            oneOnOne30Allocated: otoRes.sessions30,
+            oneOnOne45Allocated: otoRes.sessions45,
+            oneOnOne60Allocated: otoRes.sessions60,
+            group30Allocated: grpRes.sessions30,
+            group45Allocated: grpRes.sessions45,
+            group60Allocated: grpRes.sessions60,
+          })
+          .where(eq(batchEnrollments.id, activeEnrollment.id));
+
         await tx.insert(sessionAllocationLogs).values({
           studentId: input.studentId,
           changedBy: ctx.user.id,
@@ -2656,6 +3127,8 @@ export const adminRouter = createRouter({
           newGroup: input.allocatedGroup,
           reason: input.reason || null,
         });
+
+        await updateStudentSessionBalances(tx, input.studentId);
       });
 
       await updateStudentSessionBalances(db, input.studentId);

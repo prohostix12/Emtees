@@ -1,12 +1,41 @@
 import { z } from "zod";
-import { eq, desc, and, count, sql, inArray, or } from "drizzle-orm";
+import { eq, desc, and, count, sql, inArray, or, ilike } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
+import crypto from "crypto";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments, learningNotes, learningVideos, assignments, assignmentSubmissions } from "@db/schema";
+import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments, learningNotes, learningVideos, assignments, assignmentSubmissions, classBatches } from "@db/schema";
 import { sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
 import { isStudentFeeRestricted } from "../lib/feeHelper";
+
+function parseTimeSlot(timeSlot: string) {
+  const cleanStr = timeSlot.trim().toUpperCase();
+  const match1 = cleanStr.match(/^(\d+):(\d+)\s*(AM|PM)?$/);
+  if (match1) {
+    let hours = parseInt(match1[1], 10);
+    const minutes = parseInt(match1[2], 10);
+    const ampm = match1[3];
+    if (ampm === "PM" && hours < 12) {
+      hours += 12;
+    } else if (ampm === "AM" && hours === 12) {
+      hours = 0;
+    }
+    return { hours, minutes };
+  }
+  const match2 = cleanStr.match(/^(\d+)\s*(AM|PM)?$/);
+  if (match2) {
+    let hours = parseInt(match2[1], 10);
+    const ampm = match2[2];
+    if (ampm === "PM" && hours < 12) {
+      hours += 12;
+    } else if (ampm === "AM" && hours === 12) {
+      hours = 0;
+    }
+    return { hours, minutes: 0 };
+  }
+  return { hours: 9, minutes: 0 };
+}
 
 export const learningRouter = createRouter({
   // Modules
@@ -29,10 +58,17 @@ export const learningRouter = createRouter({
       maxStudents: z.number().optional(),
       minStudents: z.number().optional(),
       status: z.string().optional(),
+      courseFee: z.number().or(z.string()).optional(),
+      minimumDownPayment: z.number().or(z.string()).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb();
-      const result = await db.insert(modules).values(input).returning({ id: modules.id });
+      const { courseFee, minimumDownPayment, ...rest } = input;
+      const values: any = { ...rest };
+      if (courseFee !== undefined) values.courseFee = String(courseFee);
+      if (minimumDownPayment !== undefined) values.minimumDownPayment = String(minimumDownPayment);
+
+      const result = await db.insert(modules).values(values).returning({ id: modules.id });
       return db.query.modules.findFirst({
         where: eq(modules.id, result[0]?.id),
         with: { teacher: true },
@@ -51,10 +87,16 @@ export const learningRouter = createRouter({
       maxStudents: z.number().optional(),
       minStudents: z.number().optional(),
       status: z.string().optional(),
+      courseFee: z.number().or(z.string()).optional(),
+      minimumDownPayment: z.number().or(z.string()).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb();
-      const { id, ...data } = input;
+      const { id, courseFee, minimumDownPayment, ...rest } = input;
+      const data: any = { ...rest };
+      if (courseFee !== undefined) data.courseFee = String(courseFee);
+      if (minimumDownPayment !== undefined) data.minimumDownPayment = String(minimumDownPayment);
+
       await db.update(modules)
         .set(data)
         .where(eq(modules.id, id));
@@ -92,6 +134,12 @@ export const learningRouter = createRouter({
       startDate: z.date().optional(),
       duration: z.string().optional(),
       courseFee: z.number().optional(),
+      oneOnOne30Allocated: z.number().optional(),
+      oneOnOne45Allocated: z.number().optional(),
+      oneOnOne60Allocated: z.number().optional(),
+      group30Allocated: z.number().optional(),
+      group45Allocated: z.number().optional(),
+      group60Allocated: z.number().optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb();
@@ -100,7 +148,67 @@ export const learningRouter = createRouter({
         ...rest,
         courseFee: courseFee !== undefined ? String(courseFee) : undefined,
       }).returning({ id: batches.id });
-      return db.query.batches.findFirst({ where: eq(batches.id, result[0]?.id), with: { module: true } });
+
+      const batchId = result[0]?.id;
+
+      if (batchId && input.teacherId) {
+        // Prepare group classes to schedule
+        const groupClassesToSchedule: { title: string; duration: number }[] = [];
+        const group30 = input.group30Allocated || 0;
+        const group45 = input.group45Allocated || 0;
+        const group60 = input.group60Allocated || 0;
+
+        for (let i = 1; i <= group30; i++) {
+          groupClassesToSchedule.push({ title: `${input.name} - Group Session (30 Min) ${i}`, duration: 30 });
+        }
+        for (let i = 1; i <= group45; i++) {
+          groupClassesToSchedule.push({ title: `${input.name} - Group Session (45 Min) ${i}`, duration: 45 });
+        }
+        for (let i = 1; i <= group60; i++) {
+          groupClassesToSchedule.push({ title: `${input.name} - Group Session (60 Min) ${i}`, duration: 60 });
+        }
+
+        if (groupClassesToSchedule.length > 0) {
+          const start = input.startDate ? new Date(input.startDate) : new Date();
+          const { hours, minutes } = parseTimeSlot(input.timeSlot || "9:00 AM");
+
+          for (let i = 0; i < groupClassesToSchedule.length; i++) {
+            const item = groupClassesToSchedule[i];
+            const scheduledAt = new Date(start);
+            scheduledAt.setDate(start.getDate() + i);
+            scheduledAt.setHours(hours, minutes, 0, 0);
+
+            const slug = item.title.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase().substring(0, 50);
+            const roomName = `emtees-${slug}-${crypto.randomUUID().substring(0, 8)}`;
+
+            const [newClass] = await db.insert(classes).values({
+              batchId,
+              teacherId: input.teacherId,
+              title: item.title,
+              classType: "group",
+              status: "scheduled",
+              scheduledAt,
+              duration: item.duration,
+              meetingRoomId: roomName,
+              meetingUrl: `https://meet.jit.si/${roomName}`,
+            }).returning();
+
+            if (newClass) {
+              await db.insert(classBatches).values({
+                classId: newClass.id,
+                batchId,
+              });
+            }
+          }
+
+          const io = getIo();
+          if (io) {
+            io.emit("class:updated");
+          }
+        }
+      }
+
+      return db.query.batches.findFirst({ where: eq(batches.id, batchId), with: { module: true } });
     }),
 
   updateBatchFee: adminQuery
@@ -181,6 +289,12 @@ export const learningRouter = createRouter({
       moduleId: z.number().optional(),
       startDate: z.date().nullable().optional(),
       duration: z.string().nullable().optional(),
+      oneOnOne30Allocated: z.number().optional(),
+      oneOnOne45Allocated: z.number().optional(),
+      oneOnOne60Allocated: z.number().optional(),
+      group30Allocated: z.number().optional(),
+      group45Allocated: z.number().optional(),
+      group60Allocated: z.number().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       // Strict check: Only super_admin can edit batch details
@@ -286,6 +400,12 @@ export const learningRouter = createRouter({
             moduleId: data.moduleId,
             startDate: data.startDate,
             duration: data.duration,
+            oneOnOne30Allocated: data.oneOnOne30Allocated,
+            oneOnOne45Allocated: data.oneOnOne45Allocated,
+            oneOnOne60Allocated: data.oneOnOne60Allocated,
+            group30Allocated: data.group30Allocated,
+            group45Allocated: data.group45Allocated,
+            group60Allocated: data.group60Allocated,
           })
           .where(eq(batches.id, id));
 
@@ -331,17 +451,30 @@ export const learningRouter = createRouter({
 
       let userId: number;
       if (typeof input.studentId === "string") {
-        const parsed = parseInt(input.studentId, 10);
-        if (!isNaN(parsed) && String(parsed) === input.studentId.trim()) {
+        const trimmed = input.studentId.trim();
+        const parsed = parseInt(trimmed, 10);
+        if (!isNaN(parsed) && String(parsed) === trimmed) {
           userId = parsed;
         } else {
+          console.log(`[enrollStudent] Resolving student identifier: "${trimmed}"`);
           const u = await db.query.users.findFirst({
-            where: and(eq(users.unionId, input.studentId), eq(users.role, "student")),
+            where: and(eq(users.role, "student"), ilike(users.unionId, trimmed)),
           });
-          if (!u) {
-            throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
+          if (u) {
+            userId = u.id;
+            console.log(`[enrollStudent] Resolved student by unionId. User ID: ${userId}`);
+          } else {
+            const p = await db.query.profiles.findFirst({
+              where: ilike(profiles.enrollmentId, trimmed),
+            });
+            if (p) {
+              userId = p.userId;
+              console.log(`[enrollStudent] Resolved student by profile enrollmentId. User ID: ${userId}`);
+            } else {
+              console.warn(`[enrollStudent] Student not found with identifier: "${trimmed}"`);
+              throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
+            }
           }
-          userId = u.id;
         }
       } else {
         userId = input.studentId;
@@ -361,16 +494,34 @@ export const learningRouter = createRouter({
 
       const paymentType = input.paymentType || "FULL_PAYMENT";
 
-      await db.insert(batchEnrollments).values({
-        batchId: input.batchId,
-        studentId: userId,
-        paymentType,
-      });
-
       // Update student profile with enrolled batch and course info
       const batch = await db.query.batches.findFirst({
         where: eq(batches.id, input.batchId),
         with: { module: true },
+      });
+
+      if (!batch) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
+      }
+
+      await db.insert(batchEnrollments).values({
+        batchId: input.batchId,
+        studentId: userId,
+        paymentType,
+        moduleId: batch.moduleId,
+        oneOnOne30Allocated: batch.oneOnOne30Allocated,
+        oneOnOne45Allocated: batch.oneOnOne45Allocated,
+        oneOnOne60Allocated: batch.oneOnOne60Allocated,
+        group30Allocated: batch.group30Allocated,
+        group45Allocated: batch.group45Allocated,
+        group60Allocated: batch.group60Allocated,
+        oneOnOne30Used: 0,
+        oneOnOne45Used: 0,
+        oneOnOne60Used: 0,
+        group30Used: 0,
+        group45Used: 0,
+        group60Used: 0,
+        assignedTeachers: batch.teacherId ? [batch.teacherId] : [],
       });
 
       if (batch) {
@@ -482,17 +633,30 @@ export const learningRouter = createRouter({
 
       let userId: number;
       if (typeof input.studentId === "string") {
-        const parsed = parseInt(input.studentId, 10);
-        if (!isNaN(parsed) && String(parsed) === input.studentId.trim()) {
+        const trimmed = input.studentId.trim();
+        const parsed = parseInt(trimmed, 10);
+        if (!isNaN(parsed) && String(parsed) === trimmed) {
           userId = parsed;
         } else {
+          console.log(`[removeStudent] Resolving student identifier: "${trimmed}"`);
           const u = await db.query.users.findFirst({
-            where: and(eq(users.unionId, input.studentId), eq(users.role, "student")),
+            where: and(eq(users.role, "student"), ilike(users.unionId, trimmed)),
           });
-          if (!u) {
-            throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
+          if (u) {
+            userId = u.id;
+            console.log(`[removeStudent] Resolved student by unionId. User ID: ${userId}`);
+          } else {
+            const p = await db.query.profiles.findFirst({
+              where: ilike(profiles.enrollmentId, trimmed),
+            });
+            if (p) {
+              userId = p.userId;
+              console.log(`[removeStudent] Resolved student by profile enrollmentId. User ID: ${userId}`);
+            } else {
+              console.warn(`[removeStudent] Student not found with identifier: "${trimmed}"`);
+              throw new TRPCError({ code: "NOT_FOUND", message: "Student not found with this ID" });
+            }
           }
-          userId = u.id;
         }
       } else {
         userId = input.studentId;

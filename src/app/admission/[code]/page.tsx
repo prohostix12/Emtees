@@ -27,6 +27,8 @@ export default function AdmissionPage() {
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [selectedBatchId, setSelectedBatchId] = useState<string>("");
   const [gender, setGender] = useState("");
+  const [paymentOption, setPaymentOption] = useState<"full_payment" | "installment">("full_payment");
+  const [downPayment, setDownPayment] = useState<string>("");
   const [dob, setDob] = useState("");
   const [educationalQualification, setEducationalQualification] = useState("");
   const [parentName, setParentName] = useState("");
@@ -76,6 +78,16 @@ export default function AdmissionPage() {
       ? `${parentCountryCode}${parentPhoneNumber}`.replace(/\s+/g, "")
       : undefined;
 
+    const selectedCourse = courses?.find(c => c.id === Number(selectedCourseId));
+    const minDownPayment = selectedCourse?.minimumDownPayment ? parseFloat(selectedCourse.minimumDownPayment) : 0;
+    if (paymentOption === "installment") {
+      const parsedDP = parseFloat(downPayment) || 0;
+      if (parsedDP < minDownPayment) {
+        toast.error(`Down payment must be at least ₹${minDownPayment.toLocaleString("en-IN")}`);
+        return;
+      }
+    }
+
     registerMutation.mutate({
       name,
       phone,
@@ -90,6 +102,8 @@ export default function AdmissionPage() {
       educationalQualification: educationalQualification || undefined,
       parentName: parentName || undefined,
       parentPhone,
+      paymentOption,
+      downPayment: parseFloat(downPayment) || 0,
     });
   };
 
@@ -97,9 +111,31 @@ export default function AdmissionPage() {
   const isLoading = referralInfoQuery.isLoading;
   const isError = referralInfoQuery.isError;
 
+  const salesExec = referralData?.salesExecutive;
+  const courses = referralData?.courses || [];
+  const batches = referralData?.batches?.filter(b => b.moduleId === Number(selectedCourseId)) || [];
+
+  const selectedCourse = courses?.find(c => c.id === Number(selectedCourseId));
+  const totalCourseFee = selectedCourse?.courseFee ? parseFloat(selectedCourse.courseFee) : 0;
+  const minDownPayment = selectedCourse?.minimumDownPayment ? parseFloat(selectedCourse.minimumDownPayment) : 0;
+
+  useEffect(() => {
+    if (selectedCourse) {
+      if (paymentOption === "full_payment") {
+        setDownPayment(selectedCourse.courseFee ? String(parseFloat(selectedCourse.courseFee)) : "0");
+      } else {
+        setDownPayment(selectedCourse.minimumDownPayment ? String(parseFloat(selectedCourse.minimumDownPayment)) : "0");
+      }
+    } else {
+      setDownPayment("");
+    }
+  }, [selectedCourseId, paymentOption, selectedCourse]);
+
+  const remainingBalance = Math.max(0, totalCourseFee - (downPayment ? parseFloat(downPayment) || 0 : 0));
+
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify- p-4">
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
         <div className="text-center space-y-3">
           <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-600 mx-auto"></div>
           <p className="text-sm text-gray-500 font-medium">Loading registration details...</p>
@@ -108,7 +144,7 @@ export default function AdmissionPage() {
     );
   }
 
-  if (isError || !referralData) {
+  if (isError || !referralData || !salesExec) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
         <Card className="max-w-md w-full border-red-100 shadow-md">
@@ -130,10 +166,6 @@ export default function AdmissionPage() {
       </div>
     );
   }
-
-  const salesExec = referralData.salesExecutive;
-  const courses = referralData.courses;
-  const batches = referralData.batches.filter(b => b.moduleId === Number(selectedCourseId));
 
   // Success view
   if (registeredStudent) {
@@ -237,6 +269,60 @@ export default function AdmissionPage() {
                   </SelectContent>
                 </Select>
               </div>
+
+              {selectedCourse && (
+                <>
+                  <div className="space-y-1.5 col-span-1 md:col-span-2 border-t pt-3 mt-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs font-semibold text-gray-600">Course Fee</Label>
+                      <Input
+                        readOnly
+                        value={`₹${totalCourseFee.toLocaleString("en-IN")}`}
+                        className="bg-gray-100 rounded-lg text-xs font-semibold text-gray-700 select-none cursor-not-allowed"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="paymentOption" className="text-xs font-semibold text-gray-600">Payment Option <span className="text-red-500">*</span></Label>
+                      <Select value={paymentOption} onValueChange={(val: any) => setPaymentOption(val)}>
+                        <SelectTrigger id="paymentOption" className="bg-white rounded-lg border-gray-200 text-xs">
+                          <SelectValue placeholder="Select Payment Option" />
+                        </SelectTrigger>
+                        <SelectContent className="text-xs">
+                          <SelectItem value="full_payment">Full Payment</SelectItem>
+                          <SelectItem value="installment">Installment</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {paymentOption === "installment" && (
+                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 bg-emerald-50/30 p-3 rounded-lg border border-emerald-100/50 animate-in fade-in slide-in-from-top-2 duration-205">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="downPayment" className="text-xs font-semibold text-emerald-800">
+                          Down Payment Amount (Min: ₹{minDownPayment.toLocaleString("en-IN")}) <span className="text-red-500">*</span>
+                        </Label>
+                        <Input
+                          id="downPayment"
+                          type="number"
+                          min={minDownPayment}
+                          value={downPayment}
+                          onChange={(e) => setDownPayment(e.target.value)}
+                          className="bg-white rounded-lg text-xs"
+                          required
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-emerald-800">Remaining Balance</Label>
+                        <Input
+                          readOnly
+                          value={`₹${remainingBalance.toLocaleString("en-IN")}`}
+                          className="bg-emerald-50/50 rounded-lg text-xs font-semibold text-emerald-955 select-none cursor-not-allowed"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Profile fields */}

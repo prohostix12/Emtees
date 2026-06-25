@@ -23,6 +23,7 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
 import { toast } from "sonner";
+import { ClassAllocationSummary } from "@/components/ClassAllocationSummary";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -43,6 +44,10 @@ export default function Dashboard() {
   const notifications = trpc.student.myNotifications.useQuery(undefined, { enabled: user?.role === "student" });
   const teacherStatsQuery = trpc.user.getTeacherStats.useQuery(undefined, { enabled: isTeacher });
   const classesQuery = trpc.class.list.useQuery(undefined);
+  const studentProfileQuery = trpc.students.getProfile.useQuery(
+    { id: user?.id || 0 },
+    { enabled: user?.role === "student" }
+  );
   const myProfile = trpc.user.myProfile.useQuery(undefined, { enabled: user?.role === "student" });
 
   const [alertsSearch, setAlertsSearch] = useState("");
@@ -425,6 +430,37 @@ export default function Dashboard() {
               </CardContent>
             </Card>
           </div>
+        </div>
+      )}
+
+      {user.role === "student" && studentProfileQuery.data?.classAllocation && (
+        <div className="space-y-3">
+          <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">My Class Allocation Details</h3>
+          {(() => {
+            const classAlloc = studentProfileQuery.data.classAllocation;
+            const activeEnrollment = studentProfileQuery.data.enrollments?.find((e: any) => e.status === "active") || studentProfileQuery.data.enrollments?.[0];
+            const groupBatchName = activeEnrollment?.batch?.name || "Unassigned";
+            
+            const getTeacherName = (tId: number | null | undefined) => {
+              if (!tId) return "Unassigned";
+              const resolved = activeEnrollment?.resolvedTeachers?.find((x: any) => x.id === tId);
+              if (resolved) return resolved.name;
+              if (activeEnrollment?.batch?.teacher?.id === tId) return activeEnrollment.batch.teacher.name;
+              return `Teacher #${tId}`;
+            };
+
+            return (
+              <ClassAllocationSummary
+                allocation={classAlloc}
+                oneToOneTeacherName={getTeacherName(classAlloc.oneToOne?.teacherId)}
+                groupTeacherName={getTeacherName(classAlloc.group?.teacherId)}
+                groupBatchName={groupBatchName}
+                batchName={groupBatchName}
+                moduleName={activeEnrollment?.batch?.module?.name}
+                isAdmin={false}
+              />
+            );
+          })()}
         </div>
       )}
 

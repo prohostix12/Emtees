@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { classes, attendance, oneToOneSessions, batchEnrollments, batches, profiles, users, classBatches, classJoinRequests, attendanceAlerts, oneToOneRescheduleRequests, notifications } from "@db/schema";
+import { classes, attendance, oneToOneSessions, batchEnrollments, batches, profiles, users, classBatches, classJoinRequests, attendanceAlerts, oneToOneRescheduleRequests, notifications, studentClassAllocations } from "@db/schema";
 import { sendBulkNotification, sendNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
 import { isStudentFeeRestricted } from "../lib/feeHelper";
@@ -84,10 +84,18 @@ export const classRouter = createRouter({
           orderBy: desc(classes.scheduledAt),
           with: {
             teacher: true,
-            batch: true,
+            batch: {
+              with: {
+                module: true
+              }
+            },
             classBatches: {
               with: {
-                batch: true
+                batch: {
+                  with: {
+                    module: true
+                  }
+                }
               }
             }
           },
@@ -121,7 +129,11 @@ export const classRouter = createRouter({
           orderBy: desc(oneToOneSessions.scheduledAt),
           with: {
             teacher: true,
-            student: true,
+            student: {
+              with: {
+                profile: true
+              }
+            },
           },
         });
       }
@@ -129,6 +141,19 @@ export const classRouter = createRouter({
       // ─── PART 3: FORMAT & MAP BOTH LISTS ───
       let enrolledBatchMap = new Map<number, string>();
       let activeEnrollmentsCountMap = new Map<number, number>();
+
+      const counts = await db
+        .select({
+          batchId: batchEnrollments.batchId,
+          count: sql<number>`count(${batchEnrollments.id})::int`,
+        })
+        .from(batchEnrollments)
+        .where(eq(batchEnrollments.status, "active"))
+        .groupBy(batchEnrollments.batchId);
+      
+      for (const item of counts) {
+        activeEnrollmentsCountMap.set(item.batchId, item.count);
+      }
 
       if (ctx.user.role === "student") {
         const studentEnrollments = await db.query.batchEnrollments.findMany({
@@ -140,19 +165,6 @@ export const classRouter = createRouter({
         });
         for (const se of studentEnrollments) {
           enrolledBatchMap.set(se.batchId, se.status || "active");
-        }
-
-        const counts = await db
-          .select({
-            batchId: batchEnrollments.batchId,
-            count: sql<number>`count(${batchEnrollments.id})::int`,
-          })
-          .from(batchEnrollments)
-          .where(eq(batchEnrollments.status, "active"))
-          .groupBy(batchEnrollments.batchId);
-        
-        for (const item of counts) {
-          activeEnrollmentsCountMap.set(item.batchId, item.count);
         }
       }
 
@@ -181,6 +193,14 @@ export const classRouter = createRouter({
           }
         }
 
+        const primaryBatch = cls.batch;
+        const assignedStudentsCount = primaryBatch ? (activeEnrollmentsCountMap.get(primaryBatch.id) || 0) : 0;
+        
+        let mappedStatus: "scheduled" | "live" | "completed" | "cancelled" = "scheduled";
+        if (cls.status === "ongoing") mappedStatus = "live";
+        else if (cls.status === "completed") mappedStatus = "completed";
+        else if (cls.status === "cancelled") mappedStatus = "cancelled";
+
         return {
           ...cls,
           meetingUrl: isRestricted ? null : cls.meetingUrl,
@@ -190,15 +210,21 @@ export const classRouter = createRouter({
           isEnrolled,
           enrollmentStatus,
           enrollmentAllowed,
+          assignedStudentsCount,
+          status: mappedStatus,
         };
       });
 
       const mappedOneToOnes = oneToOnesList.map(s => {
-        let mappedStatus: "scheduled" | "ongoing" | "completed" | "cancelled" = "scheduled";
-        if (s.status === "ongoing") mappedStatus = "ongoing";
+        let mappedStatus: "scheduled" | "live" | "completed" | "cancelled" = "scheduled";
+        if (s.status === "ongoing") mappedStatus = "live";
         else if (s.status === "completed") mappedStatus = "completed";
         else if (s.status === "cancelled") mappedStatus = "cancelled";
         else if (s.status === "rescheduled") mappedStatus = "scheduled";
+
+        const profile = s.student?.profile;
+        const studentCourse = profile?.course || null;
+        const studentBatch = profile?.batch || null;
 
         return {
           id: s.id,
@@ -216,12 +242,13 @@ export const classRouter = createRouter({
           meetingRoomId: s.meetingRoomId,
           teacher: s.teacher || null,
           student: s.student || null,
-          batch: null,
+          batch: studentBatch ? { name: studentBatch, module: { name: studentCourse } } : null,
           batches: [],
           classBatches: [],
           isEnrolled: s.studentId === ctx.user.id,
           enrollmentStatus: s.studentId === ctx.user.id ? "active" : null,
           enrollmentAllowed: false,
+          assignedStudentsCount: 1,
         };
       });
 
@@ -344,11 +371,11 @@ export const classRouter = createRouter({
       const db = getDb();
       
       // Stricter role permission check
-      const isSuperAdminOrTeacher = ["super_admin", "teacher"].includes(ctx.user.role);
+      const isSuperAdminOrTeacher = ["super_admin", "admin", "academic_head", "teacher"].includes(ctx.user.role);
       if (!isSuperAdminOrTeacher) {
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: "Only Super Admin and Teacher roles can schedule classes.",
+          message: "Only Super Admin, Admin, Academic Head and Teacher roles can schedule classes.",
         });
       }
 
@@ -476,11 +503,11 @@ export const classRouter = createRouter({
       if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
 
       // Stricter role check
-      const isSuperAdminOrTeacher = ["super_admin", "teacher"].includes(ctx.user.role);
+      const isSuperAdminOrTeacher = ["super_admin", "admin", "academic_head", "teacher"].includes(ctx.user.role);
       if (!isSuperAdminOrTeacher) {
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: "Only Super Admin and Teacher roles can edit classes.",
+          message: "Only Super Admin, Admin, Academic Head and Teacher roles can edit classes.",
         });
       }
 
@@ -550,12 +577,12 @@ export const classRouter = createRouter({
       const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
       if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
 
-      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
       const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
-      if (!isSuperAdmin && !isAssignedTeacher) {
+      if (!isAdmin && !isAssignedTeacher) {
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: "Only Super Admin or the assigned Teacher can start this class.",
+          message: "Only Admins or the assigned Teacher can start this class.",
         });
       }
 
@@ -613,12 +640,12 @@ export const classRouter = createRouter({
       const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
       if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
 
-      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
       const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
-      if (!isSuperAdmin && !isAssignedTeacher) {
+      if (!isAdmin && !isAssignedTeacher) {
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: "Only Super Admin or the assigned Teacher can end this class.",
+          message: "Only Admins or the assigned Teacher can end this class.",
         });
       }
 
@@ -658,12 +685,12 @@ export const classRouter = createRouter({
       const cls = await db.query.classes.findFirst({ where: eq(classes.id, input.id) });
       if (!cls) throw new TRPCError({ code: "NOT_FOUND", message: "Class not found" });
 
-      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
       const isAssignedTeacher = ctx.user.role === "teacher" && cls.teacherId === ctx.user.id;
-      if (!isSuperAdmin && !isAssignedTeacher) {
+      if (!isAdmin && !isAssignedTeacher) {
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: "Only Super Admin or the assigned Teacher can cancel this class.",
+          message: "Only Admins or the assigned Teacher can cancel this class.",
         });
       }
 
@@ -713,10 +740,33 @@ export const classRouter = createRouter({
       }
 
       const where = filters.length > 0 ? and(...filters) : undefined;
-      return db.query.oneToOneSessions.findMany({
+      const sessions = await db.query.oneToOneSessions.findMany({
         where,
         orderBy: desc(oneToOneSessions.scheduledAt),
-        with: { teacher: true, student: true, rescheduleRequests: true },
+        with: {
+          teacher: true,
+          student: {
+            with: {
+              profile: true
+            }
+          },
+          rescheduleRequests: true
+        },
+      });
+
+      return sessions.map(s => {
+        let mappedStatus: "scheduled" | "live" | "completed" | "cancelled" | "rescheduled" | "reschedule_request_pending" = "scheduled";
+        if (s.status === "ongoing") mappedStatus = "live";
+        else if (s.status === "completed") mappedStatus = "completed";
+        else if (s.status === "cancelled") mappedStatus = "cancelled";
+        else if (s.status === "rescheduled") mappedStatus = "rescheduled";
+        else if (s.status === "reschedule_request_pending") mappedStatus = "reschedule_request_pending";
+
+        return {
+          ...s,
+          classType: "one_to_one" as const,
+          status: mappedStatus,
+        };
       });
     }),
 
@@ -730,18 +780,42 @@ export const classRouter = createRouter({
       remarks: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "super_admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can create 1-to-1 sessions." });
-      }
       const db = getDb();
-
-      const profile = await db.query.profiles.findFirst({
-        where: eq(profiles.userId, input.studentId),
+      const activeEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.studentId, input.studentId),
+          eq(batchEnrollments.status, "active")
+        )
       });
-      if (!profile || (profile.remainingOneToOneSessions ?? 0) <= 0) {
+      if (!activeEnrollment) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Student has no active batch enrollment." });
+      }
+
+      const assignedTeachers = Array.isArray(activeEnrollment.assignedTeachers) ? (activeEnrollment.assignedTeachers as number[]) : [];
+
+      const isAuthorized = ctx.user.role === "super_admin" || 
+                           ctx.user.role === "admin" || 
+                           ctx.user.role === "academic_head" ||
+                           (ctx.user.role === "teacher" && assignedTeachers.includes(ctx.user.id));
+
+      if (!isAuthorized) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins or the assigned Teacher can create 1-to-1 sessions." });
+      }
+
+      const remaining30 = Math.max(0, activeEnrollment.oneOnOne30Allocated - activeEnrollment.oneOnOne30Used);
+      const remaining45 = Math.max(0, activeEnrollment.oneOnOne45Allocated - activeEnrollment.oneOnOne45Used);
+      const remaining60 = Math.max(0, activeEnrollment.oneOnOne60Allocated - activeEnrollment.oneOnOne60Used);
+
+      let remaining = 0;
+      if (input.sessionLength === 30) remaining = remaining30;
+      else if (input.sessionLength === 45) remaining = remaining45;
+      else if (input.sessionLength === 60) remaining = remaining60;
+      else remaining = remaining30 + remaining45 + remaining60;
+
+      if (remaining <= 0) {
         throw new TRPCError({
           code: "BAD_REQUEST",
-          message: "Student has exhausted their allocated One-to-One sessions. Cannot schedule a new session.",
+          message: `Student has exhausted their allocated ${input.sessionLength}-minute One-to-One sessions. Cannot schedule a new session.`,
         });
       }
 
@@ -812,8 +886,9 @@ export const classRouter = createRouter({
       remarks: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "super_admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can edit 1-to-1 sessions." });
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
+      if (!isAdmin) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins can edit 1-to-1 sessions." });
       }
       const db = getDb();
       const oldSession = await db.query.oneToOneSessions.findFirst({
@@ -877,8 +952,9 @@ export const classRouter = createRouter({
       sessionLength: z.number().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "super_admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can reschedule 1-to-1 sessions." });
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
+      if (!isAdmin) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins can reschedule 1-to-1 sessions." });
       }
       const db = getDb();
       const oldSession = await db.query.oneToOneSessions.findFirst({
@@ -945,8 +1021,9 @@ export const classRouter = createRouter({
       sessionId: z.number(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "super_admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Only Super Admin can cancel 1-to-1 sessions." });
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
+      if (!isAdmin) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins can cancel 1-to-1 sessions." });
       }
       const db = getDb();
       const session = await db.query.oneToOneSessions.findFirst({
@@ -1102,7 +1179,7 @@ export const classRouter = createRouter({
       adminRemarks: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (!["super_admin", "admin"].includes(ctx.user.role)) {
+      if (!["super_admin", "admin", "academic_head"].includes(ctx.user.role)) {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins can approve or reject reschedule requests." });
       }
       const db = getDb();
@@ -1311,10 +1388,10 @@ export const classRouter = createRouter({
       });
       if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
 
-      const isSuperAdmin = ctx.user.role === "super_admin";
+      const isAdmin = ["super_admin", "admin", "academic_head"].includes(ctx.user.role);
       const isTeacher = ctx.user.role === "teacher" && session.teacherId === ctx.user.id;
 
-      if (!isSuperAdmin && !isTeacher) {
+      if (!isAdmin && !isTeacher) {
         throw new TRPCError({ code: "FORBIDDEN", message: "You are not authorized to end this session." });
       }
 

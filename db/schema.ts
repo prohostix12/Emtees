@@ -55,6 +55,12 @@ export const users = pgTable(
     salesExecutiveId: integer("sales_executive_id"),
     referralCode: varchar("referral_code", { length: 50 }),
     registrationSource: varchar("registration_source", { length: 50 }).default("direct"),
+    gender: varchar("gender", { length: 50 }),
+    dateOfBirth: timestamp("date_of_birth"),
+    educationalQualification: text("educational_qualification"),
+    specialization: varchar("specialization", { length: 255 }),
+    teachingExperience: integer("teaching_experience"),
+    address: text("address"),
   },
   (table) => ({
     usernameIdx: uniqueIndex("username_idx").on(table.username),
@@ -86,6 +92,10 @@ export const profiles = pgTable(
     paymentDueDate: timestamp("payment_due_date"),
     gracePeriodDays: integer("grace_period_days").default(7).notNull(),
     admissionDate: timestamp("admission_date").defaultNow(),
+    paymentOption: varchar("payment_option", { length: 20 }).default("full_payment"),
+    downPayment: decimal("down_payment", { precision: 10, scale: 2 }).default("0"),
+    remainingBalance: decimal("remaining_balance", { precision: 10, scale: 2 }).default("0"),
+    totalCourseFee: decimal("total_course_fee", { precision: 10, scale: 2 }).default("0"),
     completionDate: timestamp("completion_date"),
     activityTimeline: json("activity_timeline"),
     packageConfig: json("package_config").default({
@@ -137,6 +147,8 @@ export const modules = pgTable("modules", {
   maxStudents: integer("max_students").default(50),
   minStudents: integer("min_students").default(5),
   status: varchar("status", { length: 20 }).default("active"),
+  courseFee: decimal("course_fee", { precision: 10, scale: 2 }).default("0"),
+  minimumDownPayment: decimal("minimum_down_payment", { precision: 10, scale: 2 }).default("0"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -157,6 +169,12 @@ export const batches = pgTable("batches", {
   startDate: timestamp("start_date"),
   duration: varchar("duration", { length: 255 }),
   courseFee: decimal("course_fee", { precision: 10, scale: 2 }).default("0"),
+  oneOnOne30Allocated: integer("one_on_one_30_allocated").default(0).notNull(),
+  oneOnOne45Allocated: integer("one_on_one_45_allocated").default(0).notNull(),
+  oneOnOne60Allocated: integer("one_on_one_60_allocated").default(0).notNull(),
+  group30Allocated: integer("group_30_allocated").default(0).notNull(),
+  group45Allocated: integer("group_45_allocated").default(0).notNull(),
+  group60Allocated: integer("group_60_allocated").default(0).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -205,6 +223,19 @@ export const batchEnrollments = pgTable(
     status: varchar("status", { length: 20 }).default("active"),
     paymentType: varchar("payment_type", { length: 50 }).default("FULL_PAYMENT").notNull(),
     assignedTeachers: json("assigned_teachers").default([]),
+    moduleId: bigint("module_id", { mode: "number" }).references(() => modules.id, { onDelete: "cascade" }),
+    oneOnOne30Allocated: integer("one_on_one_30_allocated").default(0).notNull(),
+    oneOnOne45Allocated: integer("one_on_one_45_allocated").default(0).notNull(),
+    oneOnOne60Allocated: integer("one_on_one_60_allocated").default(0).notNull(),
+    group30Allocated: integer("group_30_allocated").default(0).notNull(),
+    group45Allocated: integer("group_45_allocated").default(0).notNull(),
+    group60Allocated: integer("group_60_allocated").default(0).notNull(),
+    oneOnOne30Used: integer("one_on_one_30_used").default(0).notNull(),
+    oneOnOne45Used: integer("one_on_one_45_used").default(0).notNull(),
+    oneOnOne60Used: integer("one_on_one_60_used").default(0).notNull(),
+    group30Used: integer("group_30_used").default(0).notNull(),
+    group45Used: integer("group_45_used").default(0).notNull(),
+    group60Used: integer("group_60_used").default(0).notNull(),
   },
   (table) => ({
     uniqueEnrollment: uniqueIndex("unique_enrollment_idx").on(table.batchId, table.studentId),
@@ -1025,4 +1056,47 @@ export const salesExecutives = pgTable(
 );
 export type SalesExecutive = typeof salesExecutives.$inferSelect;
 export type InsertSalesExecutive = typeof salesExecutives.$inferInsert;
+
+// Student Class Allocations
+export const studentClassAllocations = pgTable("student_class_allocations", {
+  id: serial("id").primaryKey(),
+  studentId: bigint("student_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" })
+    .unique(),
+  allocation: json("allocation").default({
+    oneToOne: {
+      teacherId: null,
+      sessions30: 0,
+      sessions45: 0,
+      sessions60: 0,
+      completed30: 0,
+      completed45: 0,
+      completed60: 0,
+      remaining30: 0,
+      remaining45: 0,
+      remaining60: 0
+    },
+    group: {
+      teacherId: null,
+      batchId: null,
+      sessions30: 0,
+      sessions45: 0,
+      sessions60: 0,
+      completed30: 0,
+      completed45: 0,
+      completed60: 0,
+      remaining30: 0,
+      remaining45: 0,
+      remaining60: 0
+    }
+  }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type StudentClassAllocation = typeof studentClassAllocations.$inferSelect;
+export type InsertStudentClassAllocation = typeof studentClassAllocations.$inferInsert;
+
+
 

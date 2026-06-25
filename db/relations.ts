@@ -44,6 +44,7 @@ import {
   communityActiveUsers,
   salesExecutives,
   studentCourseAuditLogs,
+  studentClassAllocations,
 } from "./schema";
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -131,6 +132,10 @@ export const batchEnrollmentsRelations = relations(batchEnrollments, ({ one }) =
   student: one(users, {
     fields: [batchEnrollments.studentId],
     references: [users.id],
+  }),
+  module: one(modules, {
+    fields: [batchEnrollments.moduleId],
+    references: [modules.id],
   }),
 }));
 
@@ -582,3 +587,12 @@ export const studentCourseAuditLogsRelations = relations(studentCourseAuditLogs,
     references: [users.id],
   }),
 }));
+
+export const studentClassAllocationsRelations = relations(studentClassAllocations, ({ one }) => ({
+  student: one(users, {
+    fields: [studentClassAllocations.studentId],
+    references: [users.id],
+  }),
+}));
+
+

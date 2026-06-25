@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { trpc } from "@/providers/trpc";
 import { useAuth } from "@/hooks/useAuth";
+import { useSocket } from "@/hooks/useSocket";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
@@ -15,6 +16,33 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Plus, Play, Square, Video, Calendar, Clock, XCircle, ClipboardList, Edit3 } from "lucide-react";
 import dynamic from "next/dynamic";
 const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
+
+function OngoingTimer({ startedAt }: { startedAt: string }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const start = new Date(startedAt).getTime();
+    const update = () => {
+      const now = new Date().getTime();
+      setSeconds(Math.max(0, Math.floor((now - start) / 1000)));
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [startedAt]);
+
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  const pad = (num: number) => String(num).padStart(2, "0");
+
+  return (
+    <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+      {hrs > 0 ? `${pad(hrs)}:` : ""}{pad(mins)}:{pad(secs)}
+    </span>
+  );
+}
 
 export default function ClassesPage({ type }: { type?: "group" | "one-to-one" }) {
   const { user } = useAuth();
@@ -33,6 +61,14 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
   const [otoForm, setOtoForm] = useState({ teacherId: 0, studentId: 0, sessionLength: 30, scheduledAt: "", title: "1-to-1 Session", remarks: "" });
   const [rescheduleForm, setRescheduleForm] = useState({ proposedScheduledAt: "", reason: "" });
 
+  const [selectedEnrollmentForSchedule, setSelectedEnrollmentForSchedule] = useState<any>(null);
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+
+  const [endingSession, setEndingSession] = useState<any>(null);
+  const [endRemarks, setEndRemarks] = useState("");
+  const [endSessionOpen, setEndSessionOpen] = useState(false);
+
   const handleOpenTeacherReschedule = (s: any) => {
     setSelectedOtoSession(s);
     setRescheduleForm({ proposedScheduledAt: "", reason: "" });
@@ -46,12 +82,51 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
   const isAdmin = ["super_admin", "admin", "academic_head"].includes(user?.role || "");
   const isSuperAdmin = user?.role === "super_admin";
   const isTeacher = user?.role === "teacher";
-  const canManageClasses = isSuperAdmin || isTeacher;
+  const canManageClasses = isAdmin || isTeacher;
+
+  const { socket } = useSocket();
+
+  useEffect(() => {
+    if (!socket) return;
+    const handleClassUpdated = () => {
+      classesQuery.refetch();
+      myClasses.refetch();
+      oneToOneQuery.refetch();
+      allocationsQuery.refetch();
+    };
+    socket.on("class:updated", handleClassUpdated);
+    return () => {
+      socket.off("class:updated", handleClassUpdated);
+    };
+  }, [socket]);
 
   const classesQuery = trpc.class.list.useQuery(undefined, { enabled: isAdmin || isTeacher || isSuperAdmin });
   const myClasses = trpc.class.list.useQuery(undefined, { enabled: user?.role === "student" });
   const myProfile = trpc.user.myProfile.useQuery(undefined, { enabled: user?.role === "student" });
   const oneToOneQuery = trpc.class.listOneToOne.useQuery(undefined, { enabled: !!user });
+
+  // Allocation flow queries & mutations
+  const allocationsQuery = trpc.students.listAllocations.useQuery(
+    user?.role === "teacher" ? { teacherId: user.id } : undefined,
+    { enabled: !!user && (user.role === "teacher" || isAdmin || user.role === "student") }
+  );
+
+  const [selectedScheduleDuration, setSelectedScheduleDuration] = useState<number>(30);
+  const [scheduleRemarks, setScheduleRemarks] = useState("");
+
+  const scheduleSessionMutation = trpc.class.createOneToOne.useMutation({
+    onSuccess: () => {
+      toast.success("Session scheduled successfully");
+      setScheduleOpen(false);
+      setScheduleDate("");
+      setSelectedEnrollmentForSchedule(null);
+      setScheduleRemarks("");
+      oneToOneQuery.refetch();
+      allocationsQuery.refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
   const attendanceQuery = trpc.class.getAttendance.useQuery(
     { classId: attendanceClassId || 0 },
     { enabled: !!attendanceClassId }
@@ -59,8 +134,8 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
 
   // Batches & Teachers lists for scheduling dropdowns
   const batchesQuery = trpc.learning.listBatches.useQuery(undefined, { enabled: canManageClasses });
-  const teachersQuery = trpc.user.list.useQuery({ role: "teacher" }, { enabled: isSuperAdmin });
-  const studentsQuery = trpc.user.list.useQuery({ role: "student" }, { enabled: isSuperAdmin });
+  const teachersQuery = trpc.user.list.useQuery({ role: "teacher" }, { enabled: isAdmin });
+  const studentsQuery = trpc.user.list.useQuery({ role: "student" }, { enabled: isAdmin });
 
   // Auto-complete/search states for 1-to-1 session creation/editing
   const [teacherSearch, setTeacherSearch] = useState("");
@@ -446,7 +521,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
   };
 
   const availableBatches = batchesQuery.data || [];
-  const filteredBatches = isSuperAdmin
+  const filteredBatches = isAdmin
     ? availableBatches
     : isTeacher
     ? availableBatches.filter(b => b.teacherId === user?.id)
@@ -457,12 +532,75 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
     b.module?.name?.toLowerCase().includes(batchSearch.toLowerCase())
   );
 
+  const [nowTime, setNowTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTime(new Date());
+    }, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const renderStudentJoinButton = (cls: any) => {
+    const isRestricted = !!myProfile.data?.isRestricted;
+
+    if (cls.status === "cancelled") {
+      return (
+        <Button size="sm" variant="outline" disabled className="text-gray-400 bg-gray-50 border-gray-200 text-xs rounded-xl h-8">
+          Cancelled
+        </Button>
+      );
+    }
+    if (cls.status === "completed") {
+      return (
+        <Button size="sm" variant="outline" disabled className="text-gray-400 bg-gray-50 border-gray-200 text-xs rounded-xl h-8">
+          Completed
+        </Button>
+      );
+    }
+    if (cls.status === "live" || cls.status === "ongoing") {
+      return (
+        <Button
+          size="sm"
+          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded-xl h-8"
+          onClick={() => {
+            if (cls.classType === "one_to_one") {
+              handleJoinOneToOne(cls);
+            } else {
+              handleJoinClass(cls);
+            }
+          }}
+          disabled={isRestricted}
+        >
+          <Video className="w-3.5 h-3.5 mr-1" /> Join Session
+        </Button>
+      );
+    }
+
+    // Status is scheduled
+    const now = nowTime;
+    const scheduledTime = new Date(cls.scheduledAt);
+    if (now < scheduledTime) {
+      return (
+        <Button size="sm" variant="outline" disabled className="text-gray-400 bg-gray-50 border-gray-200 text-xs rounded-xl h-8">
+          Waiting for scheduled time
+        </Button>
+      );
+    } else {
+      return (
+        <Button size="sm" variant="outline" disabled className="text-gray-400 bg-gray-50 border-gray-200 text-xs rounded-xl h-8">
+          Waiting for teacher to start the session
+        </Button>
+      );
+    }
+  };
+
   const renderClassesList = (classesList: any[]) => {
     return (
       <div className="grid grid-cols-1 gap-4 mt-2">
         {classesList?.map((cls) => {
           const isAssignedTeacher = isTeacher && cls.teacherId === user?.id;
-          const canConductThisClass = isSuperAdmin || isAssignedTeacher;
+          const canConductThisClass = isAdmin || isAssignedTeacher;
           
           return (
             <Card key={cls.id} className="border border-gray-100 hover:shadow-md transition-shadow">
@@ -474,27 +612,52 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                       {getStatusBadge(cls.status)}
                     </div>
                     {cls.description && <p className="text-sm text-gray-500">{cls.description}</p>}
-                    <div className="flex items-center gap-4 text-xs text-gray-500 flex-wrap mt-2">
-                      <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5 text-gray-400" /> {cls.scheduledAt ? new Date(cls.scheduledAt).toLocaleString() : "-"}</span>
-                      <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5 text-gray-400" /> {cls.duration || 0} min</span>
-                      <span className="bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded text-[11px] font-medium max-w-sm truncate">
-                        Batch(es): {cls.batches?.map((b: any) => b.name).join(", ") || cls.batch?.name || "-"}
-                      </span>
-                      <span className="text-slate-600">Assigned Teacher: <b>{cls.teacher?.name || "-"}</b></span>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-gray-500 mt-3 pt-3 border-t border-gray-100 w-full text-left">
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Course / Module</span>
+                        <span className="font-medium text-slate-700">{cls.batch?.module?.name || cls.batches?.[0]?.module?.name || "-"}</span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Batch</span>
+                        <span className="font-medium text-slate-700">{cls.batches?.map((b: any) => b.name).join(", ") || cls.batch?.name || "-"}</span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Session Type</span>
+                        <span className="font-medium text-slate-700 capitalize">{cls.classType === "one_to_one" ? "1-on-1 Session" : "Group Session"}</span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Assigned Teacher</span>
+                        <span className="font-medium text-slate-700">{cls.teacher?.name || "Unassigned"}</span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Date & Time</span>
+                        <span className="font-medium text-slate-700">
+                          {cls.scheduledAt ? (
+                            <>
+                              {new Date(cls.scheduledAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                              <br />
+                              {new Date(cls.scheduledAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })} - {(() => {
+                                const d = new Date(cls.scheduledAt);
+                                d.setMinutes(d.getMinutes() + (cls.duration || 60));
+                                return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                              })()}
+                            </>
+                          ) : "-"}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Duration</span>
+                        <span className="font-medium text-slate-700">{cls.duration || 0} minutes</span>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-gray-400 uppercase font-semibold">Assigned Students</span>
+                        <span className="font-medium text-slate-700">{cls.assignedStudentsCount ?? 0} student(s)</span>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-wrap justify-end shrink-0 w-full md:w-auto">
-                    {/* Join button for ongoing classes */}
-                    {cls.status === "ongoing" && (
-                      <Button
-                        size="sm"
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                        onClick={() => handleJoinClass(cls)}
-                        disabled={!!myProfile.data?.isRestricted}
-                      >
-                        <Video className="w-4 h-4 mr-1.5" /> Join Class
-                      </Button>
-                    )}
+                  <div className="flex items-center gap-2 flex-wrap justify-end shrink-0 w-full md:w-auto mt-2 md:mt-0">
+                    {/* Join button for students */}
+                    {user?.role === "student" && renderStudentJoinButton(cls)}
 
                     {/* Teacher / Admin controls */}
                     {canConductThisClass && cls.status === "scheduled" && (
@@ -506,7 +669,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                         <Play className="w-4 h-4 mr-1.5" /> Start & Join
                       </Button>
                     )}
-                    {canConductThisClass && cls.status === "ongoing" && (
+                    {canConductThisClass && (cls.status === "ongoing" || cls.status === "live") && (
                       <Button
                         size="sm"
                         variant="destructive"
@@ -685,8 +848,8 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
           />
         </div>
 
-        {/* Teacher Selection (Super Admin only) */}
-        {isSuperAdmin ? (
+        {/* Teacher Selection (Admins only) */}
+        {isAdmin ? (
           <div className="space-y-1">
             <label className="text-xs font-medium text-gray-700 dark:text-gray-300">
               Assigned Teacher <span className="text-red-500">*</span>
@@ -846,12 +1009,33 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                     )}
                   </TableCell>
                   <TableCell className="text-sm">{s.teacher?.name || "-"}</TableCell>
-                  <TableCell className="text-sm">{s.student?.name || "-"}</TableCell>
+                  <TableCell className="text-sm">
+                    <div className="font-semibold text-slate-800">{s.student?.name || "-"}</div>
+                    {s.student?.profile && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        <b>Course:</b> {s.student.profile.course || "-"}<br/>
+                        <b>Batch:</b> {s.student.profile.batch || "-"}
+                      </div>
+                    )}
+                  </TableCell>
                   <TableCell className="text-sm">{s.sessionLength} min</TableCell>
-                  <TableCell className="text-sm">{s.scheduledAt ? new Date(s.scheduledAt).toLocaleString() : "-"}</TableCell>
+                  <TableCell className="text-xs text-slate-600">
+                    {s.scheduledAt ? (
+                      <>
+                        <div className="font-semibold">{new Date(s.scheduledAt).toLocaleDateString()}</div>
+                        <div className="text-gray-400 mt-0.5">
+                          {new Date(s.scheduledAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })} - {(() => {
+                            const d = new Date(s.scheduledAt);
+                            d.setMinutes(d.getMinutes() + (s.sessionLength || 30));
+                            return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                          })()}
+                        </div>
+                      </>
+                    ) : "-"}
+                  </TableCell>
                   <TableCell className="text-sm">
                     <div className="flex flex-col gap-1">
-                      {s.status === "ongoing" ? (
+                      {s.status === "live" ? (
                         <Badge className="bg-red-500 text-white animate-pulse w-fit">🔴 Live</Badge>
                       ) : s.status === "reschedule_request_pending" ? (
                         <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px] w-fit font-medium">
@@ -867,26 +1051,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                   <TableCell>
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {/* JOIN BUTTON FOR STUDENT */}
-                      {user?.role === "student" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled
-                          className="bg-gray-100 text-gray-400 cursor-not-allowed text-xs"
-                        >
-                          Waiting for Teacher
-                        </Button>
-                      )}
-                      {user?.role === "student" && s.status === "ongoing" && (
-                        <Button
-                          size="sm"
-                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
-                          onClick={() => handleJoinOneToOne(s)}
-                          disabled={joinOneToOne.isPending}
-                        >
-                          <Video className="w-3.5 h-3.5 mr-1" /> Join Class
-                        </Button>
-                      )}
+                      {user?.role === "student" && renderStudentJoinButton({ ...s, classType: "one_to_one" })}
 
                       {/* TEACHER ACTIONS */}
                       {user?.role === "teacher" && (s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending") && (() => {
@@ -918,7 +1083,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                           </>
                         );
                       })()}
-                      {user?.role === "teacher" && s.status === "ongoing" && (
+                      {user?.role === "teacher" && s.status === "live" && (
                         <>
                           <Button
                             size="sm"
@@ -940,10 +1105,10 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                         </>
                       )}
 
-                      {/* SUPER ADMIN ACTIONS */}
-                      {isSuperAdmin && (
+                      {/* ADMIN ACTIONS */}
+                      {isAdmin && (
                         <>
-                          {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending" || s.status === "ongoing") && (
+                          {(s.status === "scheduled" || s.status === "rescheduled" || s.status === "reschedule_request_pending" || s.status === "live") && (
                             <Button
                               size="sm"
                               className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
@@ -953,7 +1118,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                               <Video className="w-3.5 h-3.5 mr-1" /> Join
                             </Button>
                           )}
-                          {s.status === "ongoing" && (
+                          {s.status === "live" && (
                             <Button
                               size="sm"
                               variant="destructive"
@@ -1013,6 +1178,110 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
     );
   };
 
+  const renderBalancesTable = (sessionTypeFilter: "one_to_one" | "group") => {
+    const list = allocationsQuery.data || [];
+    const filtered = list.filter(item => {
+      const alloc = item.allocation as any;
+      if (sessionTypeFilter === "one_to_one") {
+        return (alloc?.oneToOne?.sessions30 || 0) + (alloc?.oneToOne?.sessions45 || 0) + (alloc?.oneToOne?.sessions60 || 0) > 0;
+      } else {
+        return (alloc?.group?.sessions30 || 0) + (alloc?.group?.sessions45 || 0) + (alloc?.group?.sessions60 || 0) > 0;
+      }
+    });
+
+    const isStudent = user?.role === "student";
+
+    return (
+      <Card className="border border-gray-100">
+        <CardContent className="p-0 overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{isStudent ? (sessionTypeFilter === "one_to_one" ? "Teacher" : "Batch") : "Student"}</TableHead>
+                <TableHead className="text-center">30 Min Bal</TableHead>
+                <TableHead className="text-center">45 Min Bal</TableHead>
+                <TableHead className="text-center">60 Min Bal</TableHead>
+                {!isStudent && sessionTypeFilter === "one_to_one" && <TableHead>Teacher</TableHead>}
+                {!isStudent && sessionTypeFilter === "group" && <TableHead>Batch / Teacher</TableHead>}
+                {!isStudent && <TableHead className="text-right">Actions</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((item) => {
+                const alloc = item.allocation as any;
+                const target = sessionTypeFilter === "one_to_one" ? alloc?.oneToOne : alloc?.group;
+                
+                const displayName = isStudent
+                  ? (sessionTypeFilter === "one_to_one" ? item.o2oTeacher?.name : item.groupBatch?.name)
+                  : `${item.student?.name} (${item.student?.profile?.enrollmentId || item.student?.unionId})`;
+
+                const totalRemaining = (target?.remaining30 || 0) + (target?.remaining45 || 0) + (target?.remaining60 || 0);
+
+                return (
+                  <TableRow key={item.id} className="hover:bg-gray-50/50">
+                    <TableCell className="font-semibold text-slate-700 py-3">{displayName}</TableCell>
+                    <TableCell className="text-center font-mono">
+                      <span className="text-emerald-700 font-bold">{target?.remaining30 || 0}</span>
+                      <span className="text-gray-400 text-[10px]"> / {target?.sessions30 || 0}</span>
+                    </TableCell>
+                    <TableCell className="text-center font-mono">
+                      <span className="text-emerald-700 font-bold">{target?.remaining45 || 0}</span>
+                      <span className="text-gray-400 text-[10px]"> / {target?.sessions45 || 0}</span>
+                    </TableCell>
+                    <TableCell className="text-center font-mono">
+                      <span className="text-emerald-700 font-bold">{target?.remaining60 || 0}</span>
+                      <span className="text-gray-400 text-[10px]"> / {target?.sessions60 || 0}</span>
+                    </TableCell>
+                    {!isStudent && sessionTypeFilter === "one_to_one" && (
+                      <TableCell className="text-xs text-slate-600">
+                        {item.o2oTeacher?.name || "Unassigned"}
+                      </TableCell>
+                    )}
+                    {!isStudent && sessionTypeFilter === "group" && (
+                      <TableCell className="text-xs text-slate-600">
+                        <div><b>Batch:</b> {item.groupBatch?.name || "N/A"}</div>
+                        <div><b>Teacher:</b> {item.groupTeacher?.name || "Unassigned"}</div>
+                      </TableCell>
+                    )}
+                    {!isStudent && (
+                      <TableCell className="text-right py-2">
+                        {sessionTypeFilter === "one_to_one" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs rounded-xl"
+                            onClick={() => {
+                              setSelectedEnrollmentForSchedule(item);
+                              const d = (target?.remaining30 || 0) > 0 ? 30 : ((target?.remaining45 || 0) > 0 ? 45 : 60);
+                              setSelectedScheduleDuration(d);
+                              setScheduleDate(new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16));
+                              setScheduleOpen(true);
+                            }}
+                            disabled={totalRemaining <= 0}
+                          >
+                            <Calendar className="w-3.5 h-3.5 mr-1" /> Schedule
+                          </Button>
+                        )}
+                      </TableCell>
+                    )}
+                  </TableRow>
+                );
+              })}
+              {filtered.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-gray-400 py-10 text-xs">
+                    No allocated class balances found.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    );
+  };
+
+
   return (
     <>
       {/* Jitsi fullscreen overlay */}
@@ -1040,9 +1309,74 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
             setSelectedClassForMeeting(null);
             if (classesQuery.isSuccess) classesQuery.refetch();
             if (myClasses.isSuccess) myClasses.refetch();
+            if (oneToOneQuery.isSuccess) oneToOneQuery.refetch();
+            if (allocationsQuery.isSuccess) allocationsQuery.refetch();
           }}
         />
       )}
+
+      {/* Ongoing Class Banner */}
+      {(() => {
+        const ongoingSession = oneToOneQuery.data?.find(
+          (s) => s.status === "live" && (isAdmin || s.teacherId === user?.id || s.studentId === user?.id)
+        );
+        if (!ongoingSession) return null;
+        
+        const isConducting = isAdmin || ongoingSession.teacherId === user?.id;
+        
+        return (
+          <Card className="border-2 border-rose-500 bg-rose-50/10 shadow-lg rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-center gap-4 mb-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                <Clock className="w-5 h-5 animate-pulse text-rose-600" />
+              </div>
+              <div className="text-left">
+                <h4 className="font-bold text-slate-800 text-sm">
+                  Live Class Ongoing: {ongoingSession.student?.name}
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Type: 1-to-1 Session
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="text-right">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block">Elapsed Time</span>
+                <OngoingTimer startedAt={ongoingSession.startedAt ? (ongoingSession.startedAt instanceof Date ? ongoingSession.startedAt.toISOString() : String(ongoingSession.startedAt)) : ""} />
+              </div>
+              {isConducting ? (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl"
+                  onClick={() => {
+                    endOneToOne.mutate({ sessionId: ongoingSession.id });
+                  }}
+                  disabled={endOneToOne.isPending}
+                >
+                  <Square className="w-3.5 h-3.5 mr-1.5 fill-current" /> End Class
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
+                  onClick={() => {
+                    setSelectedClassForMeeting({
+                      id: ongoingSession.id,
+                      title: "1-to-1 Session",
+                      scheduledAt: ongoingSession.startedAt ? (ongoingSession.startedAt instanceof Date ? ongoingSession.startedAt.toISOString() : String(ongoingSession.startedAt)) : new Date().toISOString(),
+                      isOneToOne: true,
+                    });
+                    setJitsiRoom(`emtees-session-${ongoingSession.id}`);
+                  }}
+                >
+                  <Video className="w-3.5 h-3.5 mr-1.5" /> Join Class
+                </Button>
+              )}
+            </div>
+          </Card>
+        );
+      })()}
 
       <div className="space-y-6">
         <div className="flex items-center justify-between">
@@ -1063,7 +1397,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
               </DialogContent>
             </Dialog>
           )}
-          {type === "one-to-one" && isSuperAdmin && (
+          {type === "one-to-one" && isAdmin && (
             <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
               <Plus className="w-4 h-4 mr-2" /> New Session
             </Button>
@@ -1394,36 +1728,61 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
         {/* Views (Direct or Tabbed) */}
         {type ? (
           type === "group" ? (
-            <Tabs defaultValue="active" className="w-full">
-              <TabsList className="bg-slate-50 p-1 rounded-lg border max-w-md mb-4 mt-2">
-                <TabsTrigger value="active" className="text-xs py-1.5 px-3">Active & Scheduled</TabsTrigger>
-                <TabsTrigger value="history" className="text-xs py-1.5 px-3">Session History</TabsTrigger>
+            <Tabs defaultValue="classes" className="w-full">
+              <TabsList className="bg-slate-100 p-1 rounded-lg border max-w-md mb-4">
+                <TabsTrigger value="classes" className="text-xs py-1.5 px-3">Group Classes</TabsTrigger>
+                {(isAdmin || isTeacher || user?.role === "student") && (
+                  <TabsTrigger value="balances" className="text-xs py-1.5 px-3">Group Balances</TabsTrigger>
+                )}
               </TabsList>
-              
-              <TabsContent value="active" className="space-y-4">
-                {(() => {
-                  const activeList = data?.filter((cls) => cls.status === "scheduled" || cls.status === "ongoing") || [];
-                  return renderClassesList(activeList);
-                })()}
+              <TabsContent value="classes">
+                <Tabs defaultValue="active" className="w-full">
+                  <TabsList className="bg-slate-50 p-1 rounded-lg border max-w-md mb-4 mt-2">
+                    <TabsTrigger value="active" className="text-xs py-1.5 px-3">Active & Scheduled</TabsTrigger>
+                    <TabsTrigger value="history" className="text-xs py-1.5 px-3">Session History</TabsTrigger>
+                  </TabsList>
+                  
+                  <TabsContent value="active" className="space-y-4">
+                    {(() => {
+                      const activeList = data?.filter((cls) => cls.status === "scheduled" || cls.status === "live") || [];
+                      return renderClassesList(activeList);
+                    })()}
+                  </TabsContent>
+                  
+                  <TabsContent value="history" className="space-y-4">
+                    {(() => {
+                      const historyList = data?.filter((cls) => cls.status === "completed" || cls.status === "cancelled") || [];
+                      return renderClassesList(historyList);
+                    })()}
+                  </TabsContent>
+                </Tabs>
               </TabsContent>
-              
-              <TabsContent value="history" className="space-y-4">
-                {(() => {
-                  const historyList = data?.filter((cls) => cls.status === "completed" || cls.status === "cancelled") || [];
-                  return renderClassesList(historyList);
-                })()}
+              <TabsContent value="balances" className="space-y-4">
+                {renderBalancesTable("group")}
               </TabsContent>
             </Tabs>
           ) : (
-            (isAdmin || isTeacher || isSuperAdmin || user?.role === "student") ? (
-              <div className="space-y-4">
+            <Tabs defaultValue="sessions" className="w-full">
+              <TabsList className="bg-slate-100 p-1 rounded-lg border max-w-md mb-4">
+                <TabsTrigger value="sessions" className="text-xs py-1.5 px-3">1-on-1 Sessions</TabsTrigger>
+                {(isAdmin || isTeacher || user?.role === "student") && (
+                  <TabsTrigger value="balances" className="text-xs py-1.5 px-3">Students & Balances</TabsTrigger>
+                )}
+              </TabsList>
+              <TabsContent value="sessions" className="space-y-4">
+                {isAdmin && (
+                  <div className="flex justify-end gap-2">
+                    <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
+                      <Plus className="w-4 h-4 mr-2" /> New Session
+                    </Button>
+                  </div>
+                )}
                 {renderOneToOneList()}
-              </div>
-            ) : (
-              <div className="text-center text-gray-400 py-10 text-xs">
-                Not authorized to view 1-to-1 sessions.
-              </div>
-            )
+              </TabsContent>
+              <TabsContent value="balances" className="space-y-4">
+                {renderBalancesTable("one_to_one")}
+              </TabsContent>
+            </Tabs>
           )
         ) : (
           <Tabs defaultValue="classes">
@@ -1441,7 +1800,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                 
                 <TabsContent value="active" className="space-y-4">
                   {(() => {
-                    const activeList = data?.filter((cls) => cls.status === "scheduled" || cls.status === "ongoing") || [];
+                    const activeList = data?.filter((cls) => cls.status === "scheduled" || cls.status === "live") || [];
                     return renderClassesList(activeList);
                   })()}
                 </TabsContent>
@@ -1455,23 +1814,115 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
               </Tabs>
             </TabsContent>
 
-            {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && (
-              <TabsContent value="one-to-one">
-                <div className="space-y-4 mt-4">
-                  {isSuperAdmin && (
-                    <div className="flex justify-end gap-2">
-                      <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
-                        <Plus className="w-4 h-4 mr-2" /> New Session
-                      </Button>
-                    </div>
-                  )}
-                  {renderOneToOneList()}
+          {(isAdmin || isTeacher || isSuperAdmin || user?.role === "student") && (
+            <TabsContent value="one-to-one">
+              <div className="space-y-4 mt-4">
+                {isAdmin && (
+                  <div className="flex justify-end gap-2">
+                    <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleOpenCreateOto}>
+                      <Plus className="w-4 h-4 mr-2" /> New Session
+                    </Button>
+                  </div>
+                )}
+                {renderOneToOneList()}
+              </div>
+            </TabsContent>
+          )}
+        </Tabs>
+      )}
+    </div>
+
+    {/* Schedule Session Dialog */}
+    <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
+      <DialogContent className="max-w-md bg-white rounded-2xl p-6 border shadow-xl">
+        <DialogHeader>
+          <DialogTitle className="text-sm font-bold text-slate-800 uppercase tracking-wider">Schedule Class Session</DialogTitle>
+        </DialogHeader>
+        {selectedEnrollmentForSchedule && (() => {
+          const target = selectedEnrollmentForSchedule.allocation?.oneToOne;
+          const availableDurations = [];
+          if ((target?.remaining30 || 0) > 0) availableDurations.push(30);
+          if ((target?.remaining45 || 0) > 0) availableDurations.push(45);
+          if ((target?.remaining60 || 0) > 0) availableDurations.push(60);
+
+          return (
+            <div className="space-y-4 py-4 text-xs">
+              <div className="p-3 bg-slate-50 rounded-lg border text-slate-600">
+                <p className="mb-1"><strong>Student:</strong> {selectedEnrollmentForSchedule.student?.name}</p>
+                <p className="mb-1"><strong>Assigned Teacher:</strong> {selectedEnrollmentForSchedule.o2oTeacher?.name || "Unassigned"}</p>
+                <p className="mt-2 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Remaining Balance</p>
+                <div className="grid grid-cols-3 gap-2 mt-1 text-center font-mono">
+                  <div className="bg-white p-1 border rounded">30 Min: {target?.remaining30 || 0}</div>
+                  <div className="bg-white p-1 border rounded">45 Min: {target?.remaining45 || 0}</div>
+                  <div className="bg-white p-1 border rounded">60 Min: {target?.remaining60 || 0}</div>
                 </div>
-              </TabsContent>
-            )}
-          </Tabs>
-        )}
-      </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="font-semibold text-slate-500">Select Duration</label>
+                <select
+                  value={selectedScheduleDuration}
+                  onChange={(e) => setSelectedScheduleDuration(Number(e.target.value))}
+                  className="w-full border rounded-lg p-2 bg-white text-xs outline-none"
+                >
+                  {availableDurations.map(d => (
+                    <option key={d} value={d}>{d} Minutes</option>
+                  ))}
+                  {availableDurations.length === 0 && (
+                    <option value={30}>30 Minutes (No Balance)</option>
+                  )}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="font-semibold text-slate-500">Scheduled Date & Time</label>
+                <Input
+                  type="datetime-local"
+                  value={scheduleDate}
+                  onChange={(e) => setScheduleDate(e.target.value)}
+                  className="w-full text-xs"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="font-semibold text-slate-500">Remarks / Notes</label>
+                <Input
+                  type="text"
+                  value={scheduleRemarks}
+                  onChange={(e) => setScheduleRemarks(e.target.value)}
+                  placeholder="Optional session notes"
+                  className="w-full text-xs bg-white"
+                />
+              </div>
+            </div>
+          );
+        })()}
+        <DialogFooter className="gap-2">
+          <Button variant="outline" className="rounded-xl text-xs" onClick={() => setScheduleOpen(false)}>Cancel</Button>
+          <Button
+            className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold"
+            disabled={!scheduleDate || scheduleSessionMutation.isPending}
+            onClick={() => {
+              if (!selectedEnrollmentForSchedule || !scheduleDate) return;
+              const teacherId = selectedEnrollmentForSchedule.allocation?.oneToOne?.teacherId || user?.id;
+              if (!teacherId) {
+                toast.error("No teacher assigned for this One-to-One allocation.");
+                return;
+              }
+              scheduleSessionMutation.mutate({
+                studentId: selectedEnrollmentForSchedule.studentId,
+                teacherId: Number(teacherId),
+                sessionLength: selectedScheduleDuration,
+                scheduledAt: new Date(scheduleDate),
+                remarks: scheduleRemarks || undefined,
+              });
+            }}
+          >
+            {scheduleSessionMutation.isPending ? "Scheduling..." : "Schedule Session"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     </>
   );
 }

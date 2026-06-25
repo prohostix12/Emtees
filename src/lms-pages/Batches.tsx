@@ -11,6 +11,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { toast } from "sonner";
 import { Plus, Clock, Users, UserPlus, UserMinus, Trash2, CreditCard, Printer, Wallet, CheckCircle, AlertCircle, Edit } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
 
 export default function BatchesPage() {
   const { user } = useAuth();
@@ -20,6 +22,8 @@ export default function BatchesPage() {
   const [selectedModule, setSelectedModule] = useState<number | null>(null);
   const [selectedEnrollBatch, setSelectedEnrollBatch] = useState<any>(null);
   const [openEnrollModal, setOpenEnrollModal] = useState(false);
+  const [enrollPaymentOption, setEnrollPaymentOption] = useState<"full_payment" | "installment">("full_payment");
+  const [enrollDownPayment, setEnrollDownPayment] = useState<string>("");
   const [openEnrollSimulator, setOpenEnrollSimulator] = useState(false);
   const [openEditFeeModal, setOpenEditFeeModal] = useState(false);
   const [editFeeBatchId, setEditFeeBatchId] = useState<number | null>(null);
@@ -36,6 +40,12 @@ export default function BatchesPage() {
     duration: "",
     status: "active",
     moduleId: 0,
+    oneOnOne30Allocated: 0,
+    oneOnOne45Allocated: 0,
+    oneOnOne60Allocated: 0,
+    group30Allocated: 0,
+    group45Allocated: 0,
+    group60Allocated: 0,
   });
   const [openAuditLogs, setOpenAuditLogs] = useState(false);
   const auditLogsQuery = trpc.learning.listBatchAuditLogs.useQuery(undefined, { enabled: openAuditLogs });
@@ -170,14 +180,29 @@ export default function BatchesPage() {
   const handleEnrollmentPayment = async () => {
     if (!selectedEnrollBatch) return;
     try {
-      const fee = parseFloat(selectedEnrollBatch.courseFee ?? "0");
+      const fee = parseFloat(selectedEnrollBatch.module?.courseFee ?? "0");
       if (fee <= 0) {
         toast.error("Invalid course fee.");
         return;
       }
 
+      const minDP = parseFloat(selectedEnrollBatch.module?.minimumDownPayment ?? "0");
+      let dpVal = undefined;
+      if (enrollPaymentOption === "installment") {
+        const parsed = parseFloat(enrollDownPayment) || 0;
+        if (parsed < minDP) {
+          toast.error(`Down payment must be at least ₹${minDP.toLocaleString("en-IN")}`);
+          return;
+        }
+        dpVal = parsed;
+      }
+
       // Create Razorpay order
-      const order = await createEnrollmentOrder.mutateAsync({ batchId: selectedEnrollBatch.id });
+      const order = await createEnrollmentOrder.mutateAsync({
+        batchId: selectedEnrollBatch.id,
+        paymentOption: enrollPaymentOption,
+        downPayment: dpVal,
+      });
 
       // Check if key is mock
       if (order.keyId.includes("mock") || order.keyId === "") {
@@ -213,6 +238,7 @@ export default function BatchesPage() {
               razorpay_order_id: response.razorpay_order_id,
               razorpay_signature: response.razorpay_signature,
               amount: order.amount / 100,
+              paymentOption: enrollPaymentOption,
             });
             toast.success("Enrollment successful!");
             setOpenEnrollModal(false);
@@ -250,6 +276,7 @@ export default function BatchesPage() {
         razorpay_order_id: enrollSimulatorData.orderId,
         razorpay_signature: "mock_signature",
         amount: enrollSimulatorData.amount / 100,
+        paymentOption: enrollPaymentOption,
       });
       toast.success("Mock Enrollment successful!");
       setOpenEnrollSimulator(false);
@@ -286,6 +313,8 @@ export default function BatchesPage() {
         status: "active",
         maxStudents: 50,
         minStudents: 5,
+        courseFee: 0,
+        minimumDownPayment: 0,
       });
       modulesQuery.refetch();
     },
@@ -358,6 +387,8 @@ export default function BatchesPage() {
     status: "active",
     maxStudents: 50,
     minStudents: 5,
+    courseFee: 0,
+    minimumDownPayment: 0,
   });
 
   const [moduleForm, setModuleForm] = useState({
@@ -370,8 +401,10 @@ export default function BatchesPage() {
     status: "active",
     maxStudents: 50,
     minStudents: 5,
+    courseFee: 0,
+    minimumDownPayment: 0,
   });
-  const [batchForm, setBatchForm] = useState({ moduleId: 0, name: "", timeSlot: "", maxStudents: 30, teacherId: 0, startDate: "", duration: "", courseFee: 0 });
+  const [batchForm, setBatchForm] = useState({ moduleId: 0, name: "", timeSlot: "", maxStudents: 30, teacherId: 0, startDate: "", duration: "", courseFee: 0, oneOnOne30Allocated: 0, oneOnOne45Allocated: 0, oneOnOne60Allocated: 0, group30Allocated: 0, group45Allocated: 0, group60Allocated: 0 });
   const [enrollBatchId, setEnrollBatchId] = useState<number | null>(null);
   const [enrollStudentId, setEnrollStudentId] = useState("");
   const [enrollPaymentType, setEnrollPaymentType] = useState<"FULL_PAYMENT" | "INSTALLMENT">("FULL_PAYMENT");
@@ -465,6 +498,16 @@ export default function BatchesPage() {
                         <Input type="number" value={moduleForm.maxStudents} onChange={(e) => setModuleForm({ ...moduleForm, maxStudents: Number(e.target.value) })} />
                       </div>
                     </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase">Course Fee (₹)</label>
+                        <Input type="number" min="0" value={moduleForm.courseFee} onChange={(e) => setModuleForm({ ...moduleForm, courseFee: Number(e.target.value) })} />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase">Min Down Payment (₹)</label>
+                        <Input type="number" min="0" value={moduleForm.minimumDownPayment} onChange={(e) => setModuleForm({ ...moduleForm, minimumDownPayment: Number(e.target.value) })} />
+                      </div>
+                    </div>
                     <div>
                       <label className="text-xs font-semibold text-gray-500 uppercase">Status</label>
                       <select className="w-full border rounded-md px-3 py-2 text-sm" value={moduleForm.status} onChange={(e) => setModuleForm({ ...moduleForm, status: e.target.value })}>
@@ -491,7 +534,13 @@ export default function BatchesPage() {
                       teacherId: batchForm.teacherId || undefined,
                       startDate: batchForm.startDate ? new Date(batchForm.startDate) : undefined,
                       courseFee: batchForm.courseFee || undefined,
-                      duration: batchForm.duration || undefined
+                      duration: batchForm.duration || undefined,
+                      oneOnOne30Allocated: batchForm.oneOnOne30Allocated,
+                      oneOnOne45Allocated: batchForm.oneOnOne45Allocated,
+                      oneOnOne60Allocated: batchForm.oneOnOne60Allocated,
+                      group30Allocated: batchForm.group30Allocated,
+                      group45Allocated: batchForm.group45Allocated,
+                      group60Allocated: batchForm.group60Allocated,
                     }); 
                   }} className="space-y-4 mt-2">
                     <div>
@@ -533,9 +582,43 @@ export default function BatchesPage() {
                       </div>
                     </div>
                     <div>
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Course Fee (₹) *</label>
-                      <Input type="number" placeholder="e.g. 5000" value={batchForm.courseFee || ""} onChange={(e) => setBatchForm({ ...batchForm, courseFee: Number(e.target.value) })} />
-                    </div>
+                       <label className="text-xs font-semibold text-gray-500 uppercase">Course Fee (₹) *</label>
+                       <Input type="number" placeholder="e.g. 5000" value={batchForm.courseFee || ""} onChange={(e) => setBatchForm({ ...batchForm, courseFee: Number(e.target.value) })} />
+                     </div>
+                     <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
+                       <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">One-on-One Sessions Package</h4>
+                       <div className="grid grid-cols-3 gap-2">
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
+                           <Input type="number" min={0} value={batchForm.oneOnOne30Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne30Allocated: Number(e.target.value) })} />
+                         </div>
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
+                           <Input type="number" min={0} value={batchForm.oneOnOne45Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne45Allocated: Number(e.target.value) })} />
+                         </div>
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
+                           <Input type="number" min={0} value={batchForm.oneOnOne60Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne60Allocated: Number(e.target.value) })} />
+                         </div>
+                       </div>
+                     </div>
+                     <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
+                       <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">Group Sessions Package</h4>
+                       <div className="grid grid-cols-3 gap-2">
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
+                           <Input type="number" min={0} value={batchForm.group30Allocated} onChange={(e) => setBatchForm({ ...batchForm, group30Allocated: Number(e.target.value) })} />
+                         </div>
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
+                           <Input type="number" min={0} value={batchForm.group45Allocated} onChange={(e) => setBatchForm({ ...batchForm, group45Allocated: Number(e.target.value) })} />
+                         </div>
+                         <div>
+                           <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
+                           <Input type="number" min={0} value={batchForm.group60Allocated} onChange={(e) => setBatchForm({ ...batchForm, group60Allocated: Number(e.target.value) })} />
+                         </div>
+                       </div>
+                     </div>
                     <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700" disabled={createBatch.isPending}>
                       {createBatch.isPending ? "Creating..." : "Create Batch"}
                     </Button>
@@ -693,6 +776,8 @@ export default function BatchesPage() {
                                       status: mod.status || "active",
                                       maxStudents: mod.maxStudents || 50,
                                       minStudents: mod.minStudents || 5,
+                                      courseFee: mod.courseFee ? Number(mod.courseFee) : 0,
+                                      minimumDownPayment: mod.minimumDownPayment ? Number(mod.minimumDownPayment) : 0,
                                     });
                                     setOpenEditModule(true);
                                   }}
@@ -808,6 +893,8 @@ export default function BatchesPage() {
                               className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 text-xs transition-all shadow-sm"
                               onClick={() => {
                                 setSelectedEnrollBatch(batch);
+                                setEnrollPaymentOption("full_payment");
+                                setEnrollDownPayment(batch.module?.minimumDownPayment || "0");
                                 setOpenEnrollModal(true);
                               }}
                             >
@@ -971,6 +1058,12 @@ export default function BatchesPage() {
                                     duration: batch.duration || "",
                                     status: batch.status || "active",
                                     moduleId: batch.moduleId,
+                                    oneOnOne30Allocated: batch.oneOnOne30Allocated || 0,
+                                    oneOnOne45Allocated: batch.oneOnOne45Allocated || 0,
+                                    oneOnOne60Allocated: batch.oneOnOne60Allocated || 0,
+                                    group30Allocated: batch.group30Allocated || 0,
+                                    group45Allocated: batch.group45Allocated || 0,
+                                    group60Allocated: batch.group60Allocated || 0,
                                   });
                                   setOpenEditBatch(true);
                                 }}
@@ -992,57 +1085,77 @@ export default function BatchesPage() {
         {(user?.role === "student" || user?.role === "teacher") && (
           <TabsContent value="my">
             {user?.role === "student" && myProfile.data?.profile && (
-              <Card className="border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 mb-6 shadow-sm">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base flex items-center gap-2 text-emerald-800">
-                    <Wallet className="w-5 h-5 text-emerald-600 animate-pulse" />
-                    Course Fee & Payment
+              <Card className="border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 mb-6 shadow-sm overflow-hidden">
+                <CardHeader className="pb-2 bg-emerald-50/50 border-b">
+                  <CardTitle className="text-base flex items-center gap-2 text-emerald-800 font-bold">
+                    <Wallet className="w-5 h-5 text-emerald-600" />
+                    My Course Enrollment Details
                   </CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
-                    <div className="space-y-1">
-                      <p className="text-xs text-gray-500 uppercase tracking-wider">Course Name</p>
-                      <p className="font-semibold text-gray-800">{myProfile.data.profile.course || "-"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs text-gray-500 uppercase tracking-wider">Student ID</p>
-                      <p className="font-semibold text-gray-800 font-mono">{myProfile?.data?.profile?.enrollmentId || user?.unionId}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs text-gray-500 uppercase tracking-wider">Payment Status</p>
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        {myProfile.data.profile.paymentStatus === "paid" ? (
-                          <Badge className="bg-emerald-100 text-emerald-700 border border-emerald-200">
-                            <CheckCircle className="w-3.5 h-3.5 mr-1" /> Paid
-                          </Badge>
-                        ) : (
-                          <Badge variant="destructive" className="bg-amber-100 text-amber-700 hover:bg-amber-100 border border-amber-200">
-                            <AlertCircle className="w-3.5 h-3.5 mr-1" /> Pending
-                          </Badge>
-                        )}
-                      </div>
-                    </div>
-                    <div className="space-y-1 md:text-right">
-                      <p className="text-xs text-gray-500 uppercase tracking-wider">Pending Balance</p>
-                      <div className="flex flex-col md:items-end gap-1">
-                        <p className="text-2xl font-bold text-emerald-600">₹{myProfile.data.profile.feesBalance || 0}</p>
-                        {parseFloat(myProfile.data.profile.feesBalance ?? "0") > 0 ? (
-                          <Button 
-                            className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-5 transition-all shadow-sm flex items-center justify-center gap-2"
-                            onClick={handlePayment}
-                            disabled={createOrder.isPending || verifyPayment.isPending}
-                          >
-                            <CreditCard className="w-4 h-4" /> Pay Now
-                          </Button>
-                        ) : (
-                          <p className="text-xs text-emerald-600 font-medium mt-1 flex items-center gap-1">
-                            <CheckCircle className="w-3.5 h-3.5" /> All fees paid!
-                          </p>
-                        )}
-                      </div>
-                    </div>
+                <CardContent className="p-0">
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader className="bg-emerald-50/30">
+                        <TableRow>
+                          <TableHead className="w-1/2 font-semibold text-emerald-900 py-3">Field</TableHead>
+                          <TableHead className="font-semibold text-emerald-900 py-3">Value</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Course</TableCell>
+                          <TableCell className="font-semibold text-gray-800 py-3">{myProfile.data.profile.course || "-"}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Batch</TableCell>
+                          <TableCell className="font-semibold text-gray-800 py-3">{myProfile.data.profile.batch || "-"}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Total Fee</TableCell>
+                          <TableCell className="font-semibold text-gray-850 py-3">₹{parseFloat(myProfile.data.profile.totalCourseFee || myProfile.data.profile.feesTotal || "0").toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Paid Amount</TableCell>
+                          <TableCell className="font-semibold text-emerald-600 py-3">₹{parseFloat(myProfile.data.profile.feesPaid || "0").toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Remaining Balance</TableCell>
+                          <TableCell className="font-semibold text-red-600 py-3">₹{parseFloat(myProfile.data.profile.remainingBalance || myProfile.data.profile.feesBalance || "0").toLocaleString("en-IN")}</TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Payment Option</TableCell>
+                          <TableCell className="font-semibold capitalize text-gray-800 py-3">
+                            {myProfile.data.profile.paymentOption === "installment" ? "Installment" : "Full Payment"}
+                          </TableCell>
+                        </TableRow>
+                        <TableRow className="border-emerald-100/50 hover:bg-emerald-50/20">
+                          <TableCell className="font-medium text-gray-500 py-3">Payment Status</TableCell>
+                          <TableCell className="py-2">
+                            <Badge className={`capitalize font-bold ${
+                              myProfile.data.profile.paymentStatus === "paid"
+                                ? "bg-emerald-100 text-emerald-700 border-emerald-250 hover:bg-emerald-100"
+                                : myProfile.data.profile.paymentStatus === "partial"
+                                  ? "bg-amber-100 text-amber-700 border-amber-250 hover:bg-amber-100"
+                                  : "bg-red-100 text-red-700 border-red-250 hover:bg-red-100"
+                            }`}>
+                              {myProfile.data.profile.paymentStatus === "paid" ? "Paid" : myProfile.data.profile.paymentStatus === "partial" ? "Partial Paid" : "Unpaid"}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
                   </div>
+                  {parseFloat(myProfile.data.profile.feesBalance ?? "0") > 0 && (
+                    <div className="p-4 bg-emerald-50/20 border-t flex justify-end">
+                      <Button 
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-6 transition-all shadow-sm flex items-center gap-2"
+                        onClick={handlePayment}
+                        disabled={createOrder.isPending || verifyPayment.isPending}
+                      >
+                        <CreditCard className="w-4 h-4" /> Pay Installment Now
+                      </Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )}
@@ -1129,6 +1242,16 @@ export default function BatchesPage() {
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase">Max Students</label>
                 <Input type="number" value={editModuleData.maxStudents} onChange={(e) => setEditModuleData({ ...editModuleData, maxStudents: Number(e.target.value) })} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase">Course Fee (₹)</label>
+                <Input type="number" min="0" value={editModuleData.courseFee} onChange={(e) => setEditModuleData({ ...editModuleData, courseFee: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase">Min Down Payment (₹)</label>
+                <Input type="number" min="0" value={editModuleData.minimumDownPayment} onChange={(e) => setEditModuleData({ ...editModuleData, minimumDownPayment: Number(e.target.value) })} />
               </div>
             </div>
             <div>
@@ -1320,7 +1443,7 @@ export default function BatchesPage() {
                 <DialogHeader>
                   <DialogTitle className="text-white text-xl font-bold">Batch Enrollment Details</DialogTitle>
                 </DialogHeader>
-                <p className="text-emerald-100 text-sm mt-1 font-light">Review the course information and proceed to secure payment.</p>
+                <p className="text-emerald-100 text-sm mt-1 font-light">Review the course information and select your payment configuration.</p>
               </div>
 
               <div className="p-6 space-y-4 text-sm">
@@ -1352,28 +1475,85 @@ export default function BatchesPage() {
                 </div>
 
                 <div className="border-t pt-3">
-                  <span className="text-xs text-gray-400 uppercase font-semibold">Course Description</span>
-                  <p className="text-gray-600 mt-1 leading-relaxed whitespace-pre-wrap">
-                    {selectedEnrollBatch.module?.description || "No description available."}
-                  </p>
+                  <span className="text-xs text-gray-400 uppercase font-semibold block mb-2 font-bold text-gray-700">Payment Option</span>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      className={`flex flex-col items-center justify-center p-3 rounded-lg border text-center transition-all ${
+                        enrollPaymentOption === "full_payment"
+                          ? "border-emerald-600 bg-emerald-50 text-emerald-950 font-semibold shadow-sm"
+                          : "border-gray-250 hover:border-gray-300 text-gray-600"
+                      }`}
+                      onClick={() => setEnrollPaymentOption("full_payment")}
+                    >
+                      <span className="text-xs uppercase font-bold tracking-wider">Full Payment</span>
+                      <span className="text-[10px] text-gray-400 font-normal mt-0.5">Pay complete fee now</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`flex flex-col items-center justify-center p-3 rounded-lg border text-center transition-all ${
+                        enrollPaymentOption === "installment"
+                          ? "border-emerald-600 bg-emerald-50 text-emerald-950 font-semibold shadow-sm"
+                          : "border-gray-250 hover:border-gray-300 text-gray-600"
+                      }`}
+                      onClick={() => {
+                        setEnrollPaymentOption("installment");
+                        setEnrollDownPayment(selectedEnrollBatch.module?.minimumDownPayment || "0");
+                      }}
+                    >
+                      <span className="text-xs uppercase font-bold tracking-wider">Installment</span>
+                      <span className="text-[10px] text-gray-400 font-normal mt-0.5">Pay down payment now</span>
+                    </button>
+                  </div>
                 </div>
 
-                {selectedEnrollBatch.module?.learningObjectives && (
-                  <div>
-                    <span className="text-xs text-gray-400 uppercase font-semibold">Learning Objectives</span>
-                    <p className="text-gray-600 mt-1 leading-relaxed whitespace-pre-wrap">
-                      {selectedEnrollBatch.module.learningObjectives}
-                    </p>
+                {enrollPaymentOption === "full_payment" ? (
+                  <div className="border-t border-dashed pt-4 flex flex-col gap-2 bg-gray-50 p-4 rounded-xl border">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs text-gray-500 uppercase font-semibold">Total Course Fee</span>
+                      <span className="text-sm font-semibold text-gray-700">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
+                    </div>
+                    <div className="flex justify-between items-center border-t pt-2 mt-1">
+                      <div>
+                        <span className="text-xs text-emerald-950 uppercase font-bold">Amount Payable Now</span>
+                        <p className="text-gray-400 text-[10px]">Payment Status = Paid | Balance = 0</p>
+                      </div>
+                      <span className="text-2xl font-black text-emerald-600">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="border-t border-dashed pt-4 flex flex-col gap-3 bg-gray-50 p-4 rounded-xl border">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs text-gray-500 uppercase font-semibold">Total Course Fee</span>
+                      <span className="text-sm font-semibold text-gray-700">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs text-gray-500 uppercase font-semibold">Minimum Down Payment</span>
+                      <span className="text-sm font-semibold text-amber-700">₹{parseFloat(selectedEnrollBatch.module?.minimumDownPayment ?? "0").toLocaleString("en-IN")}</span>
+                    </div>
+                    
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs text-gray-500 uppercase font-semibold">Amount Paying Now (₹) *</label>
+                      <Input
+                        type="number"
+                        value={enrollDownPayment}
+                        onChange={(e) => setEnrollDownPayment(e.target.value)}
+                        placeholder="Enter amount"
+                        className="bg-white border-gray-250 focus-visible:ring-emerald-500"
+                      />
+                    </div>
+
+                    <div className="flex justify-between items-center border-t pt-2 mt-1">
+                      <div>
+                        <span className="text-xs text-gray-900 uppercase font-bold">Remaining Balance</span>
+                        <p className="text-[10px] text-gray-400">Automatically calculated</p>
+                      </div>
+                      <span className="text-xl font-bold text-gray-800">
+                        ₹{Math.max(0, (parseFloat(selectedEnrollBatch.module?.courseFee ?? "0") - (parseFloat(enrollDownPayment) || 0))).toLocaleString("en-IN")}
+                      </span>
+                    </div>
                   </div>
                 )}
-
-                <div className="border-t border-dashed pt-4 flex justify-between items-center bg-gray-50 p-4 rounded-xl border">
-                  <div>
-                    <span className="text-xs text-gray-500 uppercase font-semibold">Total Course Fee</span>
-                    <p className="text-gray-400 text-[10px]">Tax & materials included</p>
-                  </div>
-                  <p className="text-2xl font-black text-emerald-600">₹{selectedEnrollBatch.courseFee || 0}</p>
-                </div>
 
                 <div className="pt-2">
                   <Button
@@ -1411,7 +1591,7 @@ export default function BatchesPage() {
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Amount:</span>
-                <span className="text-gray-800 font-semibold">₹{(enrollSimulatorData?.amount || 0) / 100}</span>
+                <span className="text-gray-800 font-semibold">₹{((enrollSimulatorData?.amount || 0) / 100).toLocaleString("en-IN")}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Target Batch:</span>
@@ -1505,6 +1685,12 @@ export default function BatchesPage() {
               moduleId: editBatchData.moduleId,
               startDate: editBatchData.startDate ? new Date(editBatchData.startDate) : null,
               duration: editBatchData.duration || null,
+              oneOnOne30Allocated: editBatchData.oneOnOne30Allocated,
+              oneOnOne45Allocated: editBatchData.oneOnOne45Allocated,
+              oneOnOne60Allocated: editBatchData.oneOnOne60Allocated,
+              group30Allocated: editBatchData.group30Allocated,
+              group45Allocated: editBatchData.group45Allocated,
+              group60Allocated: editBatchData.group60Allocated,
             });
           }} className="space-y-4 mt-2">
             <div>
@@ -1550,12 +1736,46 @@ export default function BatchesPage() {
               </div>
             </div>
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase">Status</label>
-              <select className="w-full border rounded-md px-3 py-2 text-sm" value={editBatchData.status} onChange={(e) => setEditBatchData({ ...editBatchData, status: e.target.value })}>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
-              </select>
-            </div>
+               <label className="text-xs font-semibold text-gray-500 uppercase">Status</label>
+               <select className="w-full border rounded-md px-3 py-2 text-sm" value={editBatchData.status} onChange={(e) => setEditBatchData({ ...editBatchData, status: e.target.value })}>
+                 <option value="active">Active</option>
+                 <option value="inactive">Inactive</option>
+               </select>
+             </div>
+             <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
+               <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">One-on-One Sessions Package</h4>
+               <div className="grid grid-cols-3 gap-2">
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
+                   <Input type="number" min={0} value={editBatchData.oneOnOne30Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne30Allocated: Number(e.target.value) })} />
+                 </div>
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
+                   <Input type="number" min={0} value={editBatchData.oneOnOne45Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne45Allocated: Number(e.target.value) })} />
+                 </div>
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
+                   <Input type="number" min={0} value={editBatchData.oneOnOne60Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne60Allocated: Number(e.target.value) })} />
+                 </div>
+               </div>
+             </div>
+             <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
+               <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">Group Sessions Package</h4>
+               <div className="grid grid-cols-3 gap-2">
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
+                   <Input type="number" min={0} value={editBatchData.group30Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group30Allocated: Number(e.target.value) })} />
+                 </div>
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
+                   <Input type="number" min={0} value={editBatchData.group45Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group45Allocated: Number(e.target.value) })} />
+                 </div>
+                 <div>
+                   <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
+                   <Input type="number" min={0} value={editBatchData.group60Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group60Allocated: Number(e.target.value) })} />
+                 </div>
+               </div>
+             </div>
             <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white" disabled={updateBatch.isPending}>
               {updateBatch.isPending ? "Saving..." : "Save Changes"}
             </Button>

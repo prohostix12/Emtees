@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, desc, and, sql, count, inArray, ne } from "drizzle-orm";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { users, profiles, batchEnrollments, batches, classes, modules, teacherSalaries, payments } from "@db/schema";
+import { users, profiles, batchEnrollments, batches, classes, modules, teacherSalaries, payments, studentClassAllocations } from "@db/schema";
 import { sendNotification, sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getNextUniqueId } from "../lib/idGenerator";
 import { env } from "../lib/env";
@@ -12,6 +12,7 @@ import { phoneSchema, parseFullPhone, validatePhoneNumber, PHONE_ERROR_MESSAGE, 
 import { sendUserCredentialsEmail } from "../lib/email";
 import bcrypt from "bcryptjs";
 import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
+import { updateStudentSessionBalances } from "../lib/sessionHelper";
 
 
 export const userRouter = createRouter({
@@ -39,7 +40,7 @@ export const userRouter = createRouter({
       if (input?.status && input.status !== "all") filters.push(eq(users.status, input.status));
       if (input?.search) {
         filters.push(
-          sql`${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.phone} ILIKE ${"%" + input.search + "%"} OR ${users.email} ILIKE ${"%" + input.search + "%"}`
+          sql`${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.phone} ILIKE ${"%" + input.search + "%"} OR ${users.email} ILIKE ${"%" + input.search + "%"} OR ${users.unionId} ILIKE ${"%" + input.search + "%"} OR ${users.specialization} ILIKE ${"%" + input.search + "%"}`
         );
       }
 
@@ -63,6 +64,92 @@ export const userRouter = createRouter({
         with: { profile: true },
       });
       if (!user) throw new TRPCError({ code: "NOT_FOUND" });
+
+      if (user.role === "teacher") {
+        const assignedBatches = await db.query.batches.findMany({
+          where: eq(batches.teacherId, user.id),
+          with: { module: true },
+        });
+
+        const batchIds = assignedBatches.map(b => b.id);
+        let studentsFromBatches: any[] = [];
+        if (batchIds.length > 0) {
+          const enrollments = await db.query.batchEnrollments.findMany({
+            where: and(
+              inArray(batchEnrollments.batchId, batchIds),
+              eq(batchEnrollments.status, "active")
+            ),
+            with: {
+              student: {
+                with: { profile: true }
+              },
+              batch: true
+            }
+          });
+          studentsFromBatches = enrollments.map(e => ({
+            id: e.student.id,
+            name: e.student.name,
+            unionId: e.student.unionId,
+            email: e.student.email,
+            phone: e.student.phone,
+            status: e.student.status,
+            enrollmentType: "Batch Group",
+            batchName: e.batch.name
+          }));
+        }
+
+        const activeEnrollments = await db.query.batchEnrollments.findMany({
+          where: eq(batchEnrollments.status, "active"),
+          with: {
+            student: {
+              with: { profile: true }
+            },
+            batch: true
+          }
+        });
+        const allocatedStudents: any[] = [];
+        for (const e of activeEnrollments) {
+          const teacherIds = Array.isArray(e.assignedTeachers) ? (e.assignedTeachers as number[]) : [];
+          if (teacherIds.includes(user.id)) {
+            const studentInfo = e.student;
+            if (studentInfo) {
+              allocatedStudents.push({
+                id: studentInfo.id,
+                name: studentInfo.name,
+                unionId: studentInfo.unionId,
+                email: studentInfo.email,
+                phone: studentInfo.phone,
+                status: studentInfo.status,
+                enrollmentType: "1-to-1",
+                batchName: e.batch?.name || studentInfo.profile?.batch || "N/A"
+              });
+            }
+          }
+        }
+
+        const allStudentsMap = new Map<number, any>();
+        for (const s of studentsFromBatches) {
+          allStudentsMap.set(s.id, s);
+        }
+        for (const s of allocatedStudents) {
+          if (!allStudentsMap.has(s.id)) {
+            allStudentsMap.set(s.id, s);
+          } else {
+            const existing = allStudentsMap.get(s.id);
+            if (existing.enrollmentType !== s.enrollmentType) {
+              existing.enrollmentType = `${existing.enrollmentType} & ${s.enrollmentType}`;
+            }
+          }
+        }
+        const assignedStudentsList = Array.from(allStudentsMap.values());
+
+        return {
+          ...user,
+          assignedBatches,
+          assignedStudents: assignedStudentsList
+        };
+      }
+
       return user;
     }),
 
@@ -95,6 +182,13 @@ export const userRouter = createRouter({
           })
         ).optional(),
         enrollmentId: z.string().optional(),
+        gender: z.string().optional(),
+        dateOfBirth: z.string().or(z.date()).optional(),
+        educationalQualification: z.string().optional(),
+        specialization: z.string().optional(),
+        teachingExperience: z.number().optional(),
+        address: z.string().optional(),
+        status: z.enum(["active", "inactive", "suspended", "on_hold"]).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -143,6 +237,46 @@ export const userRouter = createRouter({
       });
       if (existingPhone) {
         throw new TRPCError({ code: "CONFLICT", message: "Phone already registered" });
+      }
+
+      if (input.email) {
+        const existingEmail = await db.query.users.findFirst({
+          where: eq(users.email, input.email),
+        });
+        if (existingEmail) {
+          throw new TRPCError({ code: "CONFLICT", message: "Email already registered" });
+        }
+      }
+
+      if (input.role === "teacher") {
+        if (!input.email) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Email is required for teachers." });
+        }
+        if (!input.gender) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Gender is required for teachers." });
+        }
+        if (!input.dateOfBirth) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Date of birth is required for teachers." });
+        }
+        const dob = new Date(input.dateOfBirth);
+        if (dob > new Date()) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Date of birth cannot be in the future." });
+        }
+        if (!input.educationalQualification || input.educationalQualification.trim().length < 1) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Educational qualification is required." });
+        }
+        if (!input.specialization || input.specialization.trim().length < 2) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Specialization is required (min 2 characters)." });
+        }
+        if (input.teachingExperience === undefined || input.teachingExperience < 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Teaching experience is required and cannot be negative." });
+        }
+        if (!input.address || input.address.trim().length < 1) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Address is required." });
+        }
+        if (input.name.trim().length < 3) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Full Name must be at least 3 characters." });
+        }
       }
 
       const formattedPhone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
@@ -210,6 +344,7 @@ export const userRouter = createRouter({
 
       const uniqueId = await getNextUniqueId(input.role);
       const canViewReports = ctx.user.role === "super_admin" && input.canViewSalaryReports ? true : false;
+      const dobDate = input.dateOfBirth ? new Date(input.dateOfBirth) : null;
       const result = await db.insert(users).values({
         unionId: uniqueId,
         name: input.name,
@@ -222,8 +357,15 @@ export const userRouter = createRouter({
         username: input.username,
         password: hashedPassword,
         role: input.role,
+        status: input.status || "active",
         canViewSalaryReports: canViewReports,
         mustChangePassword: true,
+        gender: input.gender,
+        dateOfBirth: dobDate,
+        educationalQualification: input.educationalQualification,
+        specialization: input.specialization,
+        teachingExperience: input.teachingExperience,
+        address: input.address,
       }).returning({ id: users.id });
 
       const userId = result[0]?.id;
@@ -264,6 +406,9 @@ export const userRouter = createRouter({
           feesBalance: String(feesTotal),
           paymentStatus: "unpaid",
           paymentDueDate: paymentDueDate,
+          paymentOption: paymentType === "INSTALLMENT" ? "installment" : "full_payment",
+          totalCourseFee: String(feesTotal),
+          remainingBalance: String(feesTotal),
           allocatedOneToOneSessions: allocatedOneToOne,
           allocatedGroupSessions: allocatedGroup,
           totalAllocatedSessions: totalAllocated,
@@ -275,12 +420,38 @@ export const userRouter = createRouter({
           totalAttendedSessions: 0,
         });
 
+        const oneOnOne30Allocated = input.allocatedOneToOneSessions !== undefined
+          ? input.allocatedOneToOneSessions
+          : (batch?.oneOnOne30Allocated || 0);
+        const oneOnOne45Allocated = input.allocatedOneToOneSessions !== undefined ? 0 : (batch?.oneOnOne45Allocated || 0);
+        const oneOnOne60Allocated = input.allocatedOneToOneSessions !== undefined ? 0 : (batch?.oneOnOne60Allocated || 0);
+
+        const group30Allocated = input.allocatedGroupSessions !== undefined
+          ? input.allocatedGroupSessions
+          : (batch?.group30Allocated || 0);
+        const group45Allocated = input.allocatedGroupSessions !== undefined ? 0 : (batch?.group45Allocated || 0);
+        const group60Allocated = input.allocatedGroupSessions !== undefined ? 0 : (batch?.group60Allocated || 0);
+
         // Auto-enroll student in the selected batch
         await db.insert(batchEnrollments).values({
           batchId: input.batchId,
           studentId: userId,
           status: "active",
           paymentType,
+          moduleId: batch?.moduleId,
+          oneOnOne30Allocated,
+          oneOnOne45Allocated,
+          oneOnOne60Allocated,
+          group30Allocated,
+          group45Allocated,
+          group60Allocated,
+          oneOnOne30Used: 0,
+          oneOnOne45Used: 0,
+          oneOnOne60Used: 0,
+          group30Used: 0,
+          group45Used: 0,
+          group60Used: 0,
+          assignedTeachers: batch?.teacherId ? [batch.teacherId] : [],
         });
 
         // Generate payments
@@ -307,6 +478,9 @@ export const userRouter = createRouter({
             batchId: input.batchId,
           });
         }
+
+        // Sync session balances to profile
+        await updateStudentSessionBalances(db, userId);
 
         // Trigger overcrowding warning if capacity exceeded
         if (batch) {
@@ -388,6 +562,14 @@ export const userRouter = createRouter({
         completionDate: z.date().optional(),
         canViewSalaryReports: z.boolean().optional(),
         enrollmentId: z.string().optional(),
+        username: z.string().optional(),
+        password: z.string().optional(),
+        gender: z.string().optional(),
+        dateOfBirth: z.string().or(z.date()).optional(),
+        educationalQualification: z.string().optional(),
+        specialization: z.string().optional(),
+        teachingExperience: z.number().optional(),
+        address: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -407,11 +589,90 @@ export const userRouter = createRouter({
       }
 
 
-      const { id, course, batch, feesTotal, completionDate, canViewSalaryReports, enrollmentId, ...userData } = input;
+      const { 
+        id, 
+        course, 
+        batch, 
+        feesTotal, 
+        completionDate, 
+        canViewSalaryReports, 
+        enrollmentId,
+        username,
+        password,
+        ...userData 
+      } = input;
 
       const updateData: any = { ...userData };
       if (ctx.user.role === "super_admin" && canViewSalaryReports !== undefined) {
         updateData.canViewSalaryReports = canViewSalaryReports;
+      }
+
+      if (currentUser.role === "teacher") {
+        if (input.name !== undefined && input.name.trim().length < 3) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Full Name must be at least 3 characters." });
+        }
+        if (input.email !== undefined && !input.email) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Email is required for teachers." });
+        }
+        if (input.gender !== undefined && !input.gender) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Gender is required for teachers." });
+        }
+        if (input.dateOfBirth !== undefined && !input.dateOfBirth) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Date of birth is required for teachers." });
+        }
+        if (input.educationalQualification !== undefined && input.educationalQualification.trim().length < 1) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Educational qualification is required." });
+        }
+        if (input.specialization !== undefined && input.specialization.trim().length < 2) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Specialization is required (min 2 characters)." });
+        }
+        if (input.teachingExperience !== undefined && input.teachingExperience < 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Teaching experience cannot be negative." });
+        }
+        if (input.address !== undefined && input.address.trim().length < 1) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Address is required." });
+        }
+      }
+
+      if (input.email && input.email !== currentUser.email) {
+        const existingEmail = await db.query.users.findFirst({
+          where: and(
+            eq(users.email, input.email),
+            ne(users.id, id)
+          ),
+        });
+        if (existingEmail) {
+          throw new TRPCError({ code: "CONFLICT", message: "Email already registered" });
+        }
+      }
+
+      if (username && username !== currentUser.username) {
+        const existingUsername = await db.query.users.findFirst({
+          where: and(
+            eq(users.username, username),
+            ne(users.id, id)
+          ),
+        });
+        if (existingUsername) {
+          throw new TRPCError({ code: "CONFLICT", message: "Username already exists" });
+        }
+        updateData.username = username;
+      }
+
+      if (password && password.trim() !== "") {
+        if (password.length < 6) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Password must be at least 6 characters." });
+        }
+        const hashedPassword = await bcrypt.hash(password, 10);
+        updateData.password = hashedPassword;
+      }
+
+      if (userData.dateOfBirth) {
+        const dobDate = new Date(userData.dateOfBirth);
+        if (dobDate > new Date()) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Date of birth cannot be in the future." });
+        }
+        updateData.dateOfBirth = dobDate;
       }
 
       let countryCode = input.countryCode;

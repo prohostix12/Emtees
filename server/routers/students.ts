@@ -3,16 +3,18 @@ import { TRPCError } from "@trpc/server";
 import { eq, desc, and, sql, count, inArray, ne, or, isNull, isNotNull, asc } from "drizzle-orm";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { users, profiles, batchEnrollments, batches, classes, modules, payments, attendance, privateMessages, feedback, sessionAllocationLogs, oneToOneSessions, studentCourseAuditLogs } from "@db/schema";
+import { users, profiles, batchEnrollments, batches, classes, modules, payments, attendance, privateMessages, feedback, sessionAllocationLogs, oneToOneSessions, studentCourseAuditLogs, studentClassAllocations, attendanceAlerts } from "@db/schema";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
 import { sendNotification, sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getNextUniqueId } from "../lib/idGenerator";
 import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
 import { env } from "../lib/env";
-import { isStudentFeeRestricted } from "../lib/feeHelper";
+import { isStudentFeeRestricted, recalculateStudentFees } from "../lib/feeHelper";
 import { phoneSchema, parseFullPhone, validatePhoneNumber, PHONE_ERROR_MESSAGE, getCountryISOFromDialCode } from "@contracts/validation";
 import { sendUserCredentialsEmail } from "../lib/email";
 import bcrypt from "bcryptjs";
+import { EnrollmentPaymentService } from "../lib/EnrollmentPaymentService";
+
 
 export const studentsRouter = createRouter({
   list: teacherQuery
@@ -141,6 +143,9 @@ export const studentsRouter = createRouter({
           avatar: users.avatar,
           createdAt: users.createdAt,
           updatedAt: users.updatedAt,
+          batchId: batchEnrollments.batchId,
+          courseId: batches.moduleId,
+          classAllocation: studentClassAllocations.allocation,
           profile: {
             id: profiles.id,
             enrollmentId: profiles.enrollmentId,
@@ -178,6 +183,9 @@ export const studentsRouter = createRouter({
         })
         .from(users)
         .leftJoin(profiles, eq(users.id, profiles.userId))
+        .leftJoin(batchEnrollments, and(eq(users.id, batchEnrollments.studentId), eq(batchEnrollments.status, "active")))
+        .leftJoin(batches, eq(batchEnrollments.batchId, batches.id))
+        .leftJoin(studentClassAllocations, eq(users.id, studentClassAllocations.studentId))
         .where(where)
         .limit(limit)
         .offset(offset)
@@ -396,6 +404,35 @@ export const studentsRouter = createRouter({
 
       const combinedHistory = [...formattedO2O, ...formattedGroup].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
+      const activeEnrollment = resolvedEnrollments.find((e: any) => e.status === "active") || resolvedEnrollments[0];
+      const classAllocation = activeEnrollment ? {
+        oneToOne: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          sessions30: activeEnrollment.oneOnOne30Allocated,
+          sessions45: activeEnrollment.oneOnOne45Allocated,
+          sessions60: activeEnrollment.oneOnOne60Allocated,
+          completed30: activeEnrollment.oneOnOne30Used,
+          completed45: activeEnrollment.oneOnOne45Used,
+          completed60: activeEnrollment.oneOnOne60Used,
+          remaining30: Math.max(0, activeEnrollment.oneOnOne30Allocated - activeEnrollment.oneOnOne30Used),
+          remaining45: Math.max(0, activeEnrollment.oneOnOne45Allocated - activeEnrollment.oneOnOne45Used),
+          remaining60: Math.max(0, activeEnrollment.oneOnOne60Allocated - activeEnrollment.oneOnOne60Used),
+        },
+        group: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[1] || (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          batchId: activeEnrollment.batchId,
+          sessions30: activeEnrollment.group30Allocated,
+          sessions45: activeEnrollment.group45Allocated,
+          sessions60: activeEnrollment.group60Allocated,
+          completed30: activeEnrollment.group30Used,
+          completed45: activeEnrollment.group45Used,
+          completed60: activeEnrollment.group60Used,
+          remaining30: Math.max(0, activeEnrollment.group30Allocated - activeEnrollment.group30Used),
+          remaining45: Math.max(0, activeEnrollment.group45Allocated - activeEnrollment.group45Used),
+          remaining60: Math.max(0, activeEnrollment.group60Allocated - activeEnrollment.group60Used),
+        }
+      } : null;
+
       return {
         student,
         attendance: attendanceList,
@@ -406,6 +443,7 @@ export const studentsRouter = createRouter({
         enrollments: resolvedEnrollments,
         classHistory: combinedHistory,
         studentCourseAuditLogs: auditLogsList,
+        classAllocation,
       };
     }),
 
@@ -419,6 +457,7 @@ export const studentsRouter = createRouter({
         email: z.string().email().optional(),
         username: z.string().min(3),
         password: z.string().min(6),
+        enrollmentId: z.string().optional(),
         courseId: z.number(),
         batchId: z.number(),
         feesTotal: z.number(),
@@ -442,7 +481,22 @@ export const studentsRouter = createRouter({
         parentPhoneNumber: z.string().optional(),
         parentPhone: z.string().optional(),
         notes: z.string().optional(),
-        enrollmentId: z.string().optional(),
+        // Structured Class Allocation
+        classAllocation: z.object({
+          oneToOne: z.object({
+            teacherId: z.number().nullable().optional(),
+            sessions30: z.number().default(0),
+            sessions45: z.number().default(0),
+            sessions60: z.number().default(0),
+          }),
+          group: z.object({
+            teacherId: z.number().nullable().optional(),
+            batchId: z.number().nullable().optional(),
+            sessions30: z.number().default(0),
+            sessions45: z.number().default(0),
+            sessions60: z.number().default(0),
+          }),
+        }).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -566,69 +620,60 @@ export const studentsRouter = createRouter({
         }
       }
 
-      await db.insert(profiles).values({
-        userId,
-        enrollmentId: finalEnrollmentId,
-        course: course.name,
-        batch: batch.name,
-        batchTime: batch.timeSlot || "",
-        feesTotal: String(input.feesTotal),
-        feesBalance: String(input.feesTotal),
-        paymentStatus: "unpaid",
-        paymentDueDate,
-        allocatedOneToOneSessions: input.allocatedOneToOneSessions,
-        allocatedGroupSessions: input.allocatedGroupSessions,
-        totalAllocatedSessions: input.allocatedOneToOneSessions + input.allocatedGroupSessions,
-        remainingOneToOneSessions: input.allocatedOneToOneSessions,
-        remainingGroupSessions: input.allocatedGroupSessions,
-        totalRemainingSessions: input.allocatedOneToOneSessions + input.allocatedGroupSessions,
-        attendedOneToOneSessions: 0,
-        attendedGroupSessions: 0,
-        totalAttendedSessions: 0,
-        documents: [],
-        gender: input.gender,
-        dob: input.dob ? new Date(input.dob) : null,
-        educationalQualification: input.educationalQualification,
-        parentName: input.parentName,
-        parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode}${parentPhoneNumber}`.replace(/\s+/g, "") : (input.parentPhone ? input.parentPhone.replace(/[^\d+]/g, "") : null),
-        parentCountryCode,
-        parentCountryISO,
-        parentPhoneNumber,
-        parentFullInternationalNumber: parentFullInt || null,
-        notes: input.notes,
-      });
+      const sessionsO2O30 = input.allocatedOneToOneSessions ? input.allocatedOneToOneSessions : (batch.oneOnOne30Allocated || 0);
+      const sessionsO2O45 = input.allocatedOneToOneSessions ? 0 : (batch.oneOnOne45Allocated || 0);
+      const sessionsO2O60 = input.allocatedOneToOneSessions ? 0 : (batch.oneOnOne60Allocated || 0);
+      const totalO2O = sessionsO2O30 + sessionsO2O45 + sessionsO2O60;
 
-      // Enroll in batch
-      await db.insert(batchEnrollments).values({
-        batchId: input.batchId,
-        studentId: userId,
-        status: "active",
-        paymentType: input.paymentType,
-      });
+      const sessionsGroup30 = input.allocatedGroupSessions ? input.allocatedGroupSessions : (batch.group30Allocated || 0);
+      const sessionsGroup45 = input.allocatedGroupSessions ? 0 : (batch.group45Allocated || 0);
+      const sessionsGroup60 = input.allocatedGroupSessions ? 0 : (batch.group60Allocated || 0);
+      const totalGroup = sessionsGroup30 + sessionsGroup45 + sessionsGroup60;
 
-      // Generate payments
-      if (input.paymentType === "INSTALLMENT" && input.installments && input.installments.length > 0) {
-        for (const inst of input.installments) {
-          await db.insert(payments).values({
-            studentId: userId,
-            amount: String(inst.amount),
-            type: "tuition",
-            status: "unpaid",
-            dueDate: inst.dueDate ? new Date(inst.dueDate) : null,
-            installmentNumber: inst.installmentNumber,
-            batchId: input.batchId,
-          });
+      const totalAllocated = totalO2O + totalGroup;
+
+      const packageConfig = {
+        oneToOne: {
+          total: totalO2O,
+          min30: sessionsO2O30,
+          min45: sessionsO2O45,
+          min60: sessionsO2O60
+        },
+        group: {
+          total: totalGroup,
+          min30: sessionsGroup30,
+          min45: sessionsGroup45,
+          min60: sessionsGroup60
         }
-      } else {
-        await db.insert(payments).values({
+      };
+
+      try {
+        await EnrollmentPaymentService.processEnrollment(db, {
           studentId: userId,
-          amount: String(input.feesTotal),
-          type: "tuition",
-          status: "unpaid",
-          dueDate: null,
-          installmentNumber: null,
           batchId: input.batchId,
+          moduleId: batch.moduleId,
+          totalCourseFee: input.feesTotal,
+          paymentOption: input.paymentType === "INSTALLMENT" ? "installment" : "full_payment",
+          paidAmount: 0, // Unpaid registration initially
+          remainingBalance: input.feesTotal,
+          paymentStatus: "unpaid",
+          registrationSource: "direct",
+          installments: input.installments || undefined,
+          extraProfileFields: {
+            gender: input.gender,
+            dob: input.dob ? new Date(input.dob) : null,
+            educationalQualification: input.educationalQualification,
+            parentName: input.parentName,
+            parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode}${parentPhoneNumber}`.replace(/\s+/g, "") : (input.parentPhone ? input.parentPhone.replace(/[^\d+]/g, "") : null),
+            parentCountryCode,
+            parentCountryISO,
+            parentPhoneNumber,
+            parentFullInternationalNumber: parentFullInt || null,
+            notes: input.notes,
+          }
         });
+      } catch (err: any) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: err.message || "Failed to process enrollment" });
       }
 
       // Handle capacity warnings
@@ -669,6 +714,8 @@ export const studentsRouter = createRouter({
         }
       }
 
+      await recalculateStudentFees(userId);
+
       return {
         id: userId,
         unionId: uniqueId,
@@ -689,7 +736,10 @@ export const studentsRouter = createRouter({
         // Profile details
         course: z.string().optional(),
         batch: z.string().optional(),
+        courseId: z.number().optional(),
+        batchId: z.number().optional(),
         feesTotal: z.number().optional(),
+        paymentType: z.enum(["FULL_PAYMENT", "INSTALLMENT"]).optional(),
         completionDate: z.string().nullable().optional(),
         // Personal details
         gender: z.string().optional(),
@@ -704,9 +754,9 @@ export const studentsRouter = createRouter({
         enrollmentId: z.string().optional(),
       })
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const db = getDb();
-      const { id, course, batch, feesTotal, completionDate, gender, dob, educationalQualification, parentName, parentPhone, notes, enrollmentId, ...userData } = input;
+      const { id, course, batch, courseId, batchId, feesTotal, completionDate, gender, dob, educationalQualification, parentName, parentPhone, notes, enrollmentId, paymentType, ...userData } = input;
 
       const currentStudent = await db.query.users.findFirst({
         where: eq(users.id, id),
@@ -752,8 +802,6 @@ export const studentsRouter = createRouter({
         updateData.phone = `${countryCode}${phoneNumber}`.replace(/\s+/g, "");
       }
 
-      await db.update(users).set(updateData).where(eq(users.id, id));
-
       let parentCountryCode = input.parentCountryCode;
       let parentCountryISO = input.parentCountryISO;
       let parentPhoneNumber = input.parentPhoneNumber;
@@ -782,13 +830,14 @@ export const studentsRouter = createRouter({
       }
 
       const profileUpdate: any = {
-        course,
-        batch,
         gender,
         educationalQualification,
         parentName,
         notes,
       };
+
+      if (course !== undefined) profileUpdate.course = course;
+      if (batch !== undefined) profileUpdate.batch = batch;
 
       if (parentCountryCode !== undefined) profileUpdate.parentCountryCode = parentCountryCode;
       if (parentCountryISO !== undefined) profileUpdate.parentCountryISO = parentCountryISO;
@@ -830,54 +879,243 @@ export const studentsRouter = createRouter({
         profileUpdate.completionDate = completionDate ? new Date(completionDate) : null;
       }
 
-      if (feesTotal !== undefined) {
-        profileUpdate.feesTotal = String(feesTotal);
-        if (existingProfile) {
-          const feesPaid = parseFloat(existingProfile.feesPaid ?? "0");
-          profileUpdate.feesBalance = String(feesTotal - feesPaid);
+      // Validate selected Course & Batch if provided
+      let selectedCourse = null;
+      let selectedBatch = null;
+
+      if (courseId) {
+        selectedCourse = await db.query.modules.findFirst({
+          where: eq(modules.id, courseId),
+        });
+        if (!selectedCourse) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Selected course not found." });
         }
+        if (selectedCourse.status !== "active") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Selected course is inactive." });
+        }
+        profileUpdate.course = selectedCourse.name;
       }
 
-      if (existingProfile) {
-        await db.update(profiles).set(profileUpdate).where(eq(profiles.userId, id));
-      } else {
-        await db.insert(profiles).values({
-          userId: id,
-          course: course || "",
-          batch: batch || "",
-          feesTotal: String(feesTotal || 0),
-          feesBalance: String(feesTotal || 0),
-          ...profileUpdate,
+      if (batchId) {
+        selectedBatch = await db.query.batches.findFirst({
+          where: eq(batches.id, batchId),
+          with: { module: true, teacher: true },
         });
+        if (!selectedBatch) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Selected batch not found." });
+        }
+        if (selectedBatch.status !== "active") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Selected batch is inactive or archived/deleted." });
+        }
+        if (courseId && Number(selectedBatch.moduleId) !== courseId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Selected batch does not match the selected course." });
+        }
+        profileUpdate.batch = selectedBatch.name;
+        profileUpdate.batchTime = selectedBatch.timeSlot || "";
       }
 
-      // Community enrollment on course completion
-      if (completionDate) {
-        const communityBatch = await db.query.batches.findFirst({
-          where: eq(batches.isCommunityGroup, true),
-        });
-        if (communityBatch) {
-          const existingEnrollment = await db.query.batchEnrollments.findFirst({
-            where: and(
-              eq(batchEnrollments.batchId, communityBatch.id),
-              eq(batchEnrollments.studentId, id),
-            ),
-          });
-          if (!existingEnrollment) {
-            await db.insert(batchEnrollments).values({
-              batchId: communityBatch.id,
-              studentId: id,
-              status: "active",
+      // Fetch active batch enrollment before transaction
+      const activeEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.studentId, id),
+          eq(batchEnrollments.status, "active")
+        ),
+      });
+
+      const isBatchChanged = batchId !== undefined && (!activeEnrollment || activeEnrollment.batchId !== batchId);
+
+      await db.transaction(async (tx) => {
+        // Apply user table update
+        await tx.update(users).set(updateData).where(eq(users.id, id));
+
+        // If batch is changing, handle transfer logic
+        if (isBatchChanged && batchId && selectedBatch) {
+          let oldBatchName = "-";
+          let oldBatchId: number | null = null;
+
+          if (activeEnrollment) {
+            oldBatchId = activeEnrollment.batchId;
+            const oldBatch = await tx.query.batches.findFirst({
+              where: eq(batches.id, oldBatchId),
             });
-            await sendNotification(
-              id,
-              "Welcome to the Community Group",
-              `Congratulations on completing your course! You have been enrolled in the community group: ${communityBatch.name}.`,
-              "community_group_welcome",
-            );
+            oldBatchName = oldBatch ? oldBatch.name : "-";
+
+            // Mark previous enrollment as inactive
+            await tx.update(batchEnrollments)
+              .set({ status: "inactive", leftAt: new Date() })
+              .where(eq(batchEnrollments.id, activeEnrollment.id));
+          }
+
+          // Insert new active enrollment
+          await tx.insert(batchEnrollments).values({
+            batchId: batchId,
+            studentId: id,
+            status: "active",
+            joinedAt: new Date(),
+            assignedTeachers: selectedBatch.teacherId ? [selectedBatch.teacherId] : [],
+          });
+
+          // Resolve active attendance alerts for previous batch
+          if (oldBatchId) {
+            await tx.update(attendanceAlerts)
+              .set({ status: "resolved", resolvedAt: new Date() })
+              .where(and(
+                eq(attendanceAlerts.studentId, id),
+                eq(attendanceAlerts.batchId, oldBatchId),
+                eq(attendanceAlerts.status, "active")
+              ));
+          }
+
+          // Update studentClassAllocations
+          const classAllocRecord = await tx.query.studentClassAllocations.findFirst({
+            where: eq(studentClassAllocations.studentId, id),
+          });
+
+          if (classAllocRecord) {
+            const alloc = classAllocRecord.allocation as any;
+            const updatedAlloc = {
+              ...alloc,
+              group: {
+                ...(alloc?.group || {}),
+                batchId: batchId,
+                teacherId: selectedBatch.teacherId || null,
+              },
+            };
+            await tx.update(studentClassAllocations)
+              .set({ allocation: updatedAlloc, updatedAt: new Date() })
+              .where(eq(studentClassAllocations.studentId, id));
+          } else {
+            const newAlloc = {
+              oneToOne: { teacherId: null, sessions30: 0, sessions45: 0, sessions60: 0, completed30: 0, completed45: 0, completed60: 0, remaining30: 0, remaining45: 0, remaining60: 0 },
+              group: {
+                teacherId: selectedBatch.teacherId || null,
+                batchId: batchId,
+                sessions30: 0,
+                sessions45: 0,
+                sessions60: 0,
+                completed30: 0,
+                completed45: 0,
+                completed60: 0,
+                remaining30: 0,
+                remaining45: 0,
+                remaining60: 0,
+              },
+            };
+            await tx.insert(studentClassAllocations).values({
+              studentId: id,
+              allocation: newAlloc,
+            });
+          }
+
+          // Recalculate session balances
+          await updateStudentSessionBalances(tx, id);
+
+          // Audit batch changes
+          if (selectedCourse && existingProfile && existingProfile.course !== selectedCourse.name) {
+            await tx.insert(studentCourseAuditLogs).values({
+              studentId: id,
+              changedBy: ctx.user.id,
+              changeType: "course_changed",
+              oldValue: `Course: ${existingProfile.course || "None"}`,
+              newValue: `Course: ${selectedCourse.name}`,
+            });
+          }
+
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId: id,
+            changedBy: ctx.user.id,
+            changeType: "batch_changed",
+            oldValue: `Batch: ${oldBatchName}`,
+            newValue: `Batch: ${selectedBatch.name}`,
+          });
+
+          // Course fee adjustments
+          let diff = 0;
+          if (activeEnrollment && oldBatchId) {
+            const oldBatch = await tx.query.batches.findFirst({
+              where: eq(batches.id, oldBatchId),
+            });
+            const oldFee = parseFloat(oldBatch?.courseFee ?? "0");
+            const newFee = parseFloat(selectedBatch.courseFee ?? "0");
+            diff = newFee - oldFee;
+          } else {
+            diff = parseFloat(selectedBatch.courseFee ?? "0");
+          }
+
+          const currentTotal = feesTotal !== undefined ? feesTotal : parseFloat(profileUpdate.feesTotal || existingProfile?.feesTotal || "0");
+          const currentPaid = parseFloat(existingProfile?.feesPaid ?? "0");
+          const nextTotal = Math.max(0, currentTotal + diff);
+          const nextBalance = Math.max(0, nextTotal - currentPaid);
+          const nextPaymentStatus = nextBalance <= 0 ? "paid" : (currentPaid > 0 ? "partial" : "unpaid");
+
+          profileUpdate.feesTotal = String(nextTotal);
+          profileUpdate.feesBalance = String(nextBalance);
+          profileUpdate.paymentStatus = nextPaymentStatus;
+        } else if (feesTotal !== undefined) {
+          profileUpdate.feesTotal = String(feesTotal);
+          if (existingProfile) {
+            const feesPaid = parseFloat(existingProfile.feesPaid ?? "0");
+            profileUpdate.feesBalance = String(feesTotal - feesPaid);
           }
         }
-      }
+
+        if (profileUpdate.feesTotal !== undefined) {
+          profileUpdate.totalCourseFee = profileUpdate.feesTotal;
+        }
+        if (profileUpdate.feesBalance !== undefined) {
+          profileUpdate.remainingBalance = profileUpdate.feesBalance;
+        }
+        if (input.paymentType !== undefined) {
+          profileUpdate.paymentOption = input.paymentType === "INSTALLMENT" ? "installment" : "full_payment";
+        }
+
+        // Apply profile table updates
+        if (existingProfile) {
+          await tx.update(profiles).set(profileUpdate).where(eq(profiles.userId, id));
+        } else {
+          await tx.insert(profiles).values({
+            userId: id,
+            course: profileUpdate.course || "",
+            batch: profileUpdate.batch || "",
+            feesTotal: profileUpdate.feesTotal || "0",
+            feesBalance: profileUpdate.feesBalance || "0",
+            totalCourseFee: profileUpdate.feesTotal || "0",
+            remainingBalance: profileUpdate.feesBalance || "0",
+            paymentOption: input.paymentType === "INSTALLMENT" ? "installment" : "full_payment",
+            ...profileUpdate,
+          });
+        }
+
+        // Community enrollment on course completion
+        if (completionDate) {
+          const communityBatch = await tx.query.batches.findFirst({
+            where: eq(batches.isCommunityGroup, true),
+          });
+          if (communityBatch) {
+            const existingEnrollment = await tx.query.batchEnrollments.findFirst({
+              where: and(
+                eq(batchEnrollments.batchId, communityBatch.id),
+                eq(batchEnrollments.studentId, id)
+              ),
+            });
+            if (!existingEnrollment) {
+              await tx.insert(batchEnrollments).values({
+                batchId: communityBatch.id,
+                studentId: id,
+                status: "active",
+              });
+              await sendNotification(
+                id,
+                "Welcome to the Community Group",
+                `Congratulations on completing your course! You have been enrolled in the community group: ${communityBatch.name}.`,
+                "community_group_welcome"
+              );
+            }
+          }
+        }
+      });
+
+      await recalculateStudentFees(id);
 
       return { success: true };
     }),
@@ -1117,12 +1355,7 @@ export const studentsRouter = createRouter({
 
         const assignedSessionsCount = groupCount + o2oCount;
 
-        let availabilityStatus = "Available";
-        if (activeStudentsCount >= 15) {
-          availabilityStatus = "Overloaded";
-        } else if (activeStudentsCount >= 10) {
-          availabilityStatus = "Busy";
-        }
+        const availabilityStatus = "Available";
 
         return {
           id: t.id,
@@ -1415,5 +1648,255 @@ export const studentsRouter = createRouter({
       });
 
       return { success: true };
+    }),
+
+  updateClassAllocation: adminQuery
+    .input(z.object({
+      studentId: z.number(),
+      allocation: z.object({
+        oneToOne: z.object({
+          teacherId: z.number().nullable().optional(),
+          sessions30: z.number().nonnegative(),
+          sessions45: z.number().nonnegative(),
+          sessions60: z.number().nonnegative(),
+        }),
+        group: z.object({
+          teacherId: z.number().nullable().optional(),
+          batchId: z.number().nullable().optional(),
+          sessions30: z.number().nonnegative(),
+          sessions45: z.number().nonnegative(),
+          sessions60: z.number().nonnegative(),
+        }),
+      })
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const { studentId, allocation } = input;
+
+      const profile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, studentId),
+      });
+      if (!profile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Student profile not found." });
+      }
+
+      const activeEnrollment = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.studentId, studentId),
+          eq(batchEnrollments.status, "active")
+        )
+      });
+      if (!activeEnrollment) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Active enrollment not found for student." });
+      }
+
+      const oldAlloc = {
+        oneToOne: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          sessions30: activeEnrollment.oneOnOne30Allocated,
+          sessions45: activeEnrollment.oneOnOne45Allocated,
+          sessions60: activeEnrollment.oneOnOne60Allocated,
+          completed30: activeEnrollment.oneOnOne30Used,
+          completed45: activeEnrollment.oneOnOne45Used,
+          completed60: activeEnrollment.oneOnOne60Used,
+        },
+        group: {
+          teacherId: (activeEnrollment.assignedTeachers as any)?.[1] || (activeEnrollment.assignedTeachers as any)?.[0] || null,
+          batchId: activeEnrollment.batchId,
+          sessions30: activeEnrollment.group30Allocated,
+          sessions45: activeEnrollment.group45Allocated,
+          sessions60: activeEnrollment.group60Allocated,
+          completed30: activeEnrollment.group30Used,
+          completed45: activeEnrollment.group45Used,
+          completed60: activeEnrollment.group60Used,
+        }
+      };
+      
+      await db.transaction(async (tx) => {
+        const completedO2O30 = activeEnrollment.oneOnOne30Used || 0;
+        const completedO2O45 = activeEnrollment.oneOnOne45Used || 0;
+        const completedO2O60 = activeEnrollment.oneOnOne60Used || 0;
+
+        const completedGroup30 = activeEnrollment.group30Used || 0;
+        const completedGroup45 = activeEnrollment.group45Used || 0;
+        const completedGroup60 = activeEnrollment.group60Used || 0;
+
+        const teacherIds: number[] = [];
+        if (allocation.oneToOne.teacherId) teacherIds.push(allocation.oneToOne.teacherId);
+        if (allocation.group.teacherId) teacherIds.push(allocation.group.teacherId);
+
+        await tx.update(batchEnrollments)
+          .set({
+            oneOnOne30Allocated: allocation.oneToOne.sessions30,
+            oneOnOne45Allocated: allocation.oneToOne.sessions45,
+            oneOnOne60Allocated: allocation.oneToOne.sessions60,
+            group30Allocated: allocation.group.sessions30,
+            group45Allocated: allocation.group.sessions45,
+            group60Allocated: allocation.group.sessions60,
+            assignedTeachers: teacherIds,
+          })
+          .where(eq(batchEnrollments.id, activeEnrollment.id));
+
+        // Recalculate and sync with profile
+        await updateStudentSessionBalances(tx, studentId);
+
+        // Audit Teacher assignment changes
+        const oldO2OTeacherId = oldAlloc?.oneToOne?.teacherId;
+        const newO2OTeacherId = allocation.oneToOne.teacherId;
+        if (oldO2OTeacherId !== newO2OTeacherId) {
+          const oldT = oldO2OTeacherId ? await tx.query.users.findFirst({ where: eq(users.id, oldO2OTeacherId) }) : null;
+          const newT = newO2OTeacherId ? await tx.query.users.findFirst({ where: eq(users.id, newO2OTeacherId) }) : null;
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId,
+            changedBy: ctx.user.id,
+            changeType: "teacher_changed",
+            oldValue: `O2O Teacher: ${oldT?.name || "None"}`,
+            newValue: `O2O Teacher: ${newT?.name || "None"}`,
+          });
+        }
+
+        const oldGTeacherId = oldAlloc?.group?.teacherId;
+        const newGTeacherId = allocation.group.teacherId;
+        if (oldGTeacherId !== newGTeacherId) {
+          const oldT = oldGTeacherId ? await tx.query.users.findFirst({ where: eq(users.id, oldGTeacherId) }) : null;
+          const newT = newGTeacherId ? await tx.query.users.findFirst({ where: eq(users.id, newGTeacherId) }) : null;
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId,
+            changedBy: ctx.user.id,
+            changeType: "teacher_changed",
+            oldValue: `Group Teacher: ${oldT?.name || "None"}`,
+            newValue: `Group Teacher: ${newT?.name || "None"}`,
+          });
+        }
+
+        // Audit Batch change (Group Session Batch)
+        const oldBatchId = oldAlloc?.group?.batchId;
+        const newBatchId = allocation.group.batchId;
+        if (newBatchId && oldBatchId !== newBatchId) {
+          const newBatch = await tx.query.batches.findFirst({ where: eq(batches.id, newBatchId) });
+          const oldBatch = oldBatchId ? await tx.query.batches.findFirst({ where: eq(batches.id, oldBatchId) }) : null;
+
+          if (newBatch) {
+            const activeEnrollment = await tx.query.batchEnrollments.findFirst({
+              where: and(
+                eq(batchEnrollments.studentId, studentId),
+                eq(batchEnrollments.status, "active")
+              )
+            });
+
+            if (activeEnrollment) {
+              await tx.update(batchEnrollments)
+                .set({ status: "inactive", leftAt: new Date() })
+                .where(eq(batchEnrollments.id, activeEnrollment.id));
+            }
+
+            await tx.insert(batchEnrollments).values({
+              batchId: newBatchId,
+              studentId,
+              status: "active",
+              assignedTeachers: newGTeacherId ? [newGTeacherId] : []
+            });
+
+            await tx.update(profiles)
+              .set({
+                batch: newBatch.name,
+                batchTime: newBatch.timeSlot,
+                updatedAt: new Date()
+              })
+              .where(eq(profiles.userId, studentId));
+
+            await tx.insert(studentCourseAuditLogs).values({
+              studentId,
+              changedBy: ctx.user.id,
+              changeType: "batch_changed",
+              oldValue: `Batch: ${oldBatch?.name || "None"}`,
+              newValue: `Batch: ${newBatch.name}`,
+            });
+          }
+        }
+
+        // Audit session count adjustments
+        const oldO2OTotal = (oldAlloc?.oneToOne?.sessions30 || 0) + (oldAlloc?.oneToOne?.sessions45 || 0) + (oldAlloc?.oneToOne?.sessions60 || 0);
+        const newO2OTotal = allocation.oneToOne.sessions30 + allocation.oneToOne.sessions45 + allocation.oneToOne.sessions60;
+        const oldGTotal = (oldAlloc?.group?.sessions30 || 0) + (oldAlloc?.group?.sessions45 || 0) + (oldAlloc?.group?.sessions60 || 0);
+        const newGTotal = allocation.group.sessions30 + allocation.group.sessions45 + allocation.group.sessions60;
+
+        if (oldO2OTotal !== newO2OTotal || oldGTotal !== newGTotal) {
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId,
+            changedBy: ctx.user.id,
+            changeType: "class_count_updated",
+            oldValue: `O2O: ${oldO2OTotal}, Group: ${oldGTotal}`,
+            newValue: `O2O: ${newO2OTotal}, Group: ${newGTotal}`,
+          });
+        }
+      });
+
+      return { success: true };
+    }),
+
+  listAllocations: authedQuery
+    .input(z.object({
+      teacherId: z.number().optional(),
+      sessionType: z.enum(["one_to_one", "group"]).optional()
+    }).optional())
+    .query(async ({ input, ctx }) => {
+      const db = getDb();
+      
+      const allAllocations = await db.query.studentClassAllocations.findMany({
+        with: {
+          student: {
+            with: {
+              profile: true
+            }
+          }
+        }
+      });
+
+      const enriched = await Promise.all(allAllocations.map(async (record) => {
+        const alloc = record.allocation as any;
+        
+        let o2oTeacher = null;
+        if (alloc?.oneToOne?.teacherId) {
+          o2oTeacher = await db.query.users.findFirst({ where: eq(users.id, alloc.oneToOne.teacherId) });
+        }
+
+        let groupTeacher = null;
+        if (alloc?.group?.teacherId) {
+          groupTeacher = await db.query.users.findFirst({ where: eq(users.id, alloc.group.teacherId) });
+        }
+
+        let groupBatch = null;
+        if (alloc?.group?.batchId) {
+          groupBatch = await db.query.batches.findFirst({ where: eq(batches.id, alloc.group.batchId) });
+        }
+
+        return {
+          id: record.id,
+          studentId: record.studentId,
+          student: record.student,
+          allocation: alloc,
+          o2oTeacher,
+          groupTeacher,
+          groupBatch,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+        };
+      }));
+
+      let filtered = enriched;
+      if (ctx.user.role === "teacher") {
+        filtered = enriched.filter(e => 
+          e.allocation?.oneToOne?.teacherId === ctx.user.id || 
+          e.allocation?.group?.teacherId === ctx.user.id
+        );
+      } else if (input?.teacherId) {
+        filtered = enriched.filter(e => 
+          e.allocation?.oneToOne?.teacherId === input.teacherId || 
+          e.allocation?.group?.teacherId === input.teacherId
+        );
+      }
+
+      return filtered;
     }),
 });

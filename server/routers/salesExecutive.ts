@@ -16,6 +16,8 @@ import { getNextUniqueId } from "../lib/idGenerator";
 import { phoneSchema, parseFullPhone, validatePhoneNumber, PHONE_ERROR_MESSAGE, getCountryISOFromDialCode } from "@contracts/validation";
 import bcrypt from "bcryptjs";
 import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
+import { EnrollmentPaymentService } from "../lib/EnrollmentPaymentService";
+
 
 // Sales Executive middleware: checks if user is super_admin, admin, or sales_executive
 const salesExecQuery = authedQuery.use(async ({ ctx, next }) => {
@@ -41,6 +43,8 @@ export const salesExecutiveRouter = createRouter({
 
       if (input?.status && input.status !== "all") {
         filters.push(eq(salesExecutives.status, input.status));
+      } else {
+        filters.push(ne(salesExecutives.status, "deleted"));
       }
 
       if (input?.search) {
@@ -577,6 +581,8 @@ export const salesExecutiveRouter = createRouter({
         educationalQualification: z.string().optional(),
         parentName: z.string().optional(),
         parentPhone: z.string().optional(),
+        paymentOption: z.enum(["full_payment", "installment"]),
+        downPayment: z.number().optional(),
       })
     )
     .mutation(async ({ input }) => {
@@ -625,6 +631,17 @@ export const salesExecutiveRouter = createRouter({
       });
       if (!batch) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid batch selection." });
 
+      // Admission payment option logic and validations
+      const totalCourseFee = course.courseFee ? parseFloat(course.courseFee) : 0;
+      const minDownPayment = course.minimumDownPayment ? parseFloat(course.minimumDownPayment) : 0;
+
+      const feeDetails = EnrollmentPaymentService.calculateFees({
+        totalCourseFee,
+        paymentOption: input.paymentOption,
+        downPayment: input.downPayment,
+        minDownPayment,
+      });
+
       const uniqueStudentId = await getNextUniqueId("student");
       const hashedPassword = await bcrypt.hash(input.password, 10);
 
@@ -649,9 +666,6 @@ export const salesExecutiveRouter = createRouter({
 
       const studentId = userResult[0].id;
 
-      const nextEnrollmentId = await generateNextEnrollmentId();
-      const defaultFee = batch.courseFee ? parseFloat(batch.courseFee) : 0;
-
       // Validate and parse parent phone
       let parentCountryCode = "";
       let parentCountryISO = "";
@@ -668,51 +682,53 @@ export const salesExecutiveRouter = createRouter({
         }
       }
 
-      await db.insert(profiles).values({
-        userId: studentId,
-        enrollmentId: nextEnrollmentId,
-        course: course.name,
-        batch: batch.name,
-        batchTime: batch.timeSlot || "",
-        feesTotal: String(defaultFee),
-        feesBalance: String(defaultFee),
-        paymentStatus: "unpaid",
-        allocatedOneToOneSessions: 0,
-        allocatedGroupSessions: 0,
-        totalAllocatedSessions: 0,
-        remainingOneToOneSessions: 0,
-        remainingGroupSessions: 0,
-        totalRemainingSessions: 0,
-        attendedOneToOneSessions: 0,
-        attendedGroupSessions: 0,
-        totalAttendedSessions: 0,
-        gender: input.gender || null,
-        dob: input.dob ? new Date(input.dob) : null,
-        educationalQualification: input.educationalQualification || null,
-        parentName: input.parentName || null,
-        parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode} ${parentPhoneNumber}` : (input.parentPhone || null),
-        parentCountryCode: parentCountryCode || null,
-        parentCountryISO: parentCountryISO || null,
-        parentPhoneNumber: parentPhoneNumber || null,
-        parentFullInternationalNumber: parentFullInt || null,
+      const installments: any[] = [];
+      if (input.paymentOption === "installment") {
+        const initialPayment = input.downPayment ?? minDownPayment;
+        const remaining = Math.max(0, totalCourseFee - initialPayment);
+        installments.push({
+          installmentNumber: 1,
+          amount: initialPayment,
+          dueDate: new Date(),
+        });
+        if (remaining > 0) {
+          installments.push({
+            installmentNumber: 2,
+            amount: remaining,
+            dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days later
+          });
+        }
+      }
+
+      await db.transaction(async (tx) => {
+        try {
+          await EnrollmentPaymentService.processEnrollment(tx, {
+            studentId,
+            batchId: input.batchId,
+            moduleId: input.courseId,
+            totalCourseFee,
+            paymentOption: input.paymentOption,
+            paidAmount: 0, // Unpaid registration initially
+            remainingBalance: totalCourseFee,
+            paymentStatus: "unpaid",
+            registrationSource: "referral",
+            installments: installments.length > 0 ? installments : undefined,
+            extraProfileFields: {
+              gender: input.gender || null,
+              dob: input.dob ? new Date(input.dob) : null,
+              educationalQualification: input.educationalQualification || null,
+              parentName: input.parentName || null,
+              parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode} ${parentPhoneNumber}` : (input.parentPhone || null),
+              parentCountryCode: parentCountryCode || null,
+              parentCountryISO: parentCountryISO || null,
+              parentPhoneNumber: parentPhoneNumber || null,
+              parentFullInternationalNumber: parentFullInt || null,
+            }
+          });
+        } catch (err: any) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message || "Failed to process enrollment" });
+        }
       });
-
-      await db.insert(batchEnrollments).values({
-        batchId: input.batchId,
-        studentId: studentId,
-        status: "active",
-        paymentType: "FULL_PAYMENT",
-      });
-
-      await db.insert(payments).values({
-        studentId: studentId,
-        amount: String(defaultFee),
-        type: "tuition",
-        status: "unpaid",
-        batchId: input.batchId,
-      });
-
-
 
       return {
         success: true,
@@ -748,5 +764,75 @@ export const salesExecutiveRouter = createRouter({
           assignedSalesExecutive: true,
         },
       });
+    }),
+
+  deleteExecutive: adminQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      if (ctx.user.role !== "super_admin" && ctx.user.role !== "admin") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only administrators are allowed to delete sales executives.",
+        });
+      }
+
+      const db = getDb();
+      const exec = await db.query.salesExecutives.findFirst({
+        where: eq(salesExecutives.id, input.id),
+      });
+
+      if (!exec) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Sales Executive not found.",
+        });
+      }
+
+      const uniqueSuffix = `_del_${Date.now()}`;
+      const newUsername = `${exec.username}${uniqueSuffix}`;
+      const newEmail = exec.email ? `${exec.email}${uniqueSuffix}` : null;
+      const newPhone = `del_${exec.id}`;
+      const newFullIntNum = `del_${exec.id}`;
+      const newPhoneNumber = `del_${exec.id}`;
+      const newCountryCode = `del_`;
+      const newReferralCode = `${exec.referralCode}${uniqueSuffix}`;
+      const newEmployeeId = `${exec.employeeId}${uniqueSuffix}`;
+
+      await db.transaction(async (tx) => {
+        // Update user record first to release unique constraints
+        await tx.update(users)
+          .set({
+            status: "inactive",
+            username: newUsername,
+            email: newEmail,
+            phone: newPhone,
+            countryCode: newCountryCode,
+            phoneNumber: newPhoneNumber,
+            fullInternationalNumber: newFullIntNum,
+          })
+          .where(eq(users.id, exec.userId));
+
+        // Update sales executive record to soft delete and release constraints
+        await tx.update(salesExecutives)
+          .set({
+            status: "deleted",
+            username: newUsername,
+            email: newEmail,
+            phone: newPhone,
+            countryCode: newCountryCode,
+            phoneNumber: newPhoneNumber,
+            fullInternationalNumber: newFullIntNum,
+            referralCode: newReferralCode,
+            employeeId: newEmployeeId,
+          })
+          .where(eq(salesExecutives.id, exec.id));
+      });
+
+      console.log(`[AUDIT LOG] [Sales Executive Delete] Admin User: ${ctx.user.name} (ID: ${ctx.user.id}) soft-deleted Sales Executive ID: ${exec.id} (Employee ID: ${exec.employeeId}, Name: ${exec.name}) at ${new Date().toISOString()}`);
+
+      return {
+        success: true,
+        message: "Sales Executive deleted successfully.",
+      };
     }),
 });

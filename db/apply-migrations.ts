@@ -29,8 +29,6 @@ async function applyMigrations() {
       console.log("'sales_executive' already exists in role enum.");
     }
 
-    console.log("Dropping tables if exist to ensure clean slate...");
-    await client.query(`DROP TABLE IF EXISTS "sales_executives" CASCADE;`);
 
     console.log("Creating sales_executives table...");
     await client.query(`
@@ -65,11 +63,29 @@ async function applyMigrations() {
     await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "country_iso" varchar(10);`);
     await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "full_international_number" varchar(50);`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS "full_int_phone_idx" ON "users" ("full_international_number");`);
+    
+    console.log("Adding teacher columns to users table...");
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "gender" varchar(50);`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "date_of_birth" timestamp;`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "educational_qualification" text;`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "specialization" varchar(255);`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "teaching_experience" integer;`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "address" text;`);
 
 
 
     console.log("Adding package_config to profiles...");
     await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "package_config" json DEFAULT '{"oneToOne": {"total": 0, "min30": 0, "min45": 0, "min60": 0}, "group": {"total": 0, "min30": 0, "min45": 0, "min60": 0}}';`);
+
+    console.log("Adding payment_option, down_payment, remaining_balance, total_course_fee to profiles...");
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "payment_option" varchar(20) DEFAULT 'full_payment';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "down_payment" decimal(10, 2) DEFAULT '0';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "remaining_balance" decimal(10, 2) DEFAULT '0';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "total_course_fee" decimal(10, 2) DEFAULT '0';`);
+
+    console.log("Adding course_fee and minimum_down_payment to modules...");
+    await client.query(`ALTER TABLE "modules" ADD COLUMN IF NOT EXISTS "course_fee" decimal(10, 2) DEFAULT '0';`);
+    await client.query(`ALTER TABLE "modules" ADD COLUMN IF NOT EXISTS "minimum_down_payment" decimal(10, 2) DEFAULT '0';`);
 
     console.log("Adding assigned_teachers to batch_enrollments...");
     await client.query(`ALTER TABLE "batch_enrollments" ADD COLUMN IF NOT EXISTS "assigned_teachers" json DEFAULT '[]';`);
@@ -163,6 +179,60 @@ async function applyMigrations() {
       ALTER TABLE "teacher_salaries" ADD COLUMN IF NOT EXISTS "deduction_amount" decimal(10, 2) DEFAULT '0';
       ALTER TABLE "teacher_salaries" ADD COLUMN IF NOT EXISTS "incentive_amount" decimal(10, 2) DEFAULT '0';
       ALTER TABLE "teacher_salaries" ADD COLUMN IF NOT EXISTS "net_salary" decimal(10, 2) DEFAULT '0';
+    `);
+
+    console.log("Creating student_enrollments table...");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "student_enrollments" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "student_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "batch_id" integer NOT NULL REFERENCES "batches"("id") ON DELETE CASCADE,
+        "teacher_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "session_type" varchar(50) NOT NULL,
+        "class_duration" integer NOT NULL,
+        "total_classes" integer NOT NULL,
+        "completed_classes" integer DEFAULT 0 NOT NULL,
+        "remaining_classes" integer NOT NULL,
+        "status" varchar(50) DEFAULT 'active' NOT NULL,
+        "start_date" timestamp,
+        "created_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
+    console.log("Adding start_date column to student_enrollments if not exists...");
+    await client.query(`
+      ALTER TABLE "student_enrollments" ADD COLUMN IF NOT EXISTS "start_date" timestamp;
+    `);
+
+    console.log("Creating class_sessions table...");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "class_sessions" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "student_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "teacher_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "batch_id" integer NOT NULL REFERENCES "batches"("id") ON DELETE CASCADE,
+        "enrollment_id" integer NOT NULL REFERENCES "student_enrollments"("id") ON DELETE CASCADE,
+        "session_type" varchar(50) NOT NULL,
+        "duration" integer NOT NULL,
+        "started_at" timestamp,
+        "ended_at" timestamp,
+        "actual_duration" integer,
+        "attendance_status" varchar(50),
+        "remarks" text,
+        "created_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
+    console.log("Creating teacher_class_summary table...");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "teacher_class_summary" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "teacher_id" integer NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+        "total_assigned_classes" integer DEFAULT 0 NOT NULL,
+        "completed_classes" integer DEFAULT 0 NOT NULL,
+        "remaining_classes" integer DEFAULT 0 NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL
+      );
     `);
 
     console.log("Migrations applied successfully!");

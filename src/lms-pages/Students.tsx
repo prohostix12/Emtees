@@ -13,15 +13,24 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Search, Plus, Upload, Edit, Trash2, Download, Eye, FileText, Send, Calendar, CreditCard, Award, MessageCircle, FileUp, User, Clock, AlertTriangle, CheckCircle, RefreshCcw, BookOpen, History, Settings, X } from "lucide-react";
+
+const getEnrollmentSourceLabel = (source: string | null | undefined) => {
+  if (source === "referral") return "Sales Executive Referral";
+  if (source === "self") return "Student Self Enrollment";
+  return "Direct Admission";
+};
+import { Search, Plus, Upload, Edit, Trash2, Download, Eye, FileText, Send, Calendar, CreditCard, Award, MessageCircle, FileUp, User, Clock, AlertTriangle, CheckCircle, RefreshCcw, BookOpen, History, Settings, X, Play, GraduationCap } from "lucide-react";
 import { validatePhoneNumber } from "@contracts/validation";
 import { PhoneNumberInput } from "@/components/PhoneNumberInput";
 import { useEffect } from "react";
+import { ClassAllocationForm, ClassAllocationValue } from "@/components/ClassAllocationForm";
+import { ClassAllocationSummary } from "@/components/ClassAllocationSummary";
+import { ClassBalanceAdjustment } from "@/components/ClassBalanceAdjustment";
 
 export default function StudentsPage() {
   const { user } = useAuth();
@@ -122,6 +131,31 @@ export default function StudentsPage() {
     enrollmentId: "",
   });
 
+  const [classAllocation, setClassAllocation] = useState<ClassAllocationValue>({
+    oneToOne: {
+      teacherId: "",
+      sessions30: 0,
+      sessions45: 0,
+      sessions60: 0,
+    },
+    group: {
+      teacherId: "",
+      batchId: "",
+      sessions30: 0,
+      sessions45: 0,
+      sessions60: 0,
+    },
+  });
+
+  const [isConfiguringAllocation, setIsConfiguringAllocation] = useState(false);
+  const [tempAllocation, setTempAllocation] = useState<ClassAllocationValue>({
+    oneToOne: { teacherId: "", sessions30: 0, sessions45: 0, sessions60: 0 },
+    group: { teacherId: "", batchId: "", sessions30: 0, sessions45: 0, sessions60: 0 },
+  });
+
+  const [isAdjustingBalance, setIsAdjustingBalance] = useState(false);
+  const [adjustType, setAdjustType] = useState<"oneToOne" | "group">("oneToOne");
+
   const [paymentType, setPaymentType] = useState<"FULL_PAYMENT" | "INSTALLMENT">("FULL_PAYMENT");
   const [installmentCount, setInstallmentCount] = useState<number>(2);
   const [installments, setInstallments] = useState<Array<{ installmentNumber: number; amount: number; dueDate?: string }>>([]);
@@ -132,8 +166,60 @@ export default function StudentsPage() {
   // Fee adjustment state
   const [feeForm, setFeeForm] = useState({ minInitialPayment: 0, paymentDueDate: "" });
 
+  // Student Fee Rules state
+  const [feeRulesState, setFeeRulesState] = useState<{
+    paymentType: "FULL_PAYMENT" | "INSTALLMENT";
+    totalCourseFee: number;
+    initialPayment: number;
+    numInstallments: number;
+    installments: Array<{
+      installmentNumber: number;
+      amount: number;
+      dueDate: string;
+      status: "paid" | "unpaid";
+    }>;
+  } | null>(null);
+
+  const [isConfirmingFeeRules, setIsConfirmingFeeRules] = useState(false);
+
   // Session adjustment state
   const [sessionForm, setSessionForm] = useState({ allocatedOneToOne: 0, allocatedGroup: 0, reason: "" });
+
+  const resetForm = () => {
+    setForm({
+      name: "",
+      countryCode: "+91",
+      countryISO: "IN",
+      phoneNumber: "",
+      email: "",
+      username: "",
+      password: "",
+      courseId: "",
+      batchId: "",
+      feesTotal: 0,
+      allocatedOneToOneSessions: 0,
+      allocatedGroupSessions: 0,
+      paymentType: "FULL_PAYMENT",
+      gender: "",
+      dob: "",
+      educationalQualification: "",
+      parentName: "",
+      parentPhone: "",
+      parentCountryCode: "+91",
+      parentCountryISO: "IN",
+      parentPhoneNumber: "",
+      notes: "",
+      enrollmentId: "",
+    });
+    setClassAllocation({
+      oneToOne: { teacherId: "", sessions30: 0, sessions45: 0, sessions60: 0 },
+      group: { teacherId: "", batchId: "", sessions30: 0, sessions45: 0, sessions60: 0 }
+    });
+    setIdGenerationType("auto");
+    setPaymentType("FULL_PAYMENT");
+    setInstallmentCount(2);
+    setInstallments([]);
+  };
 
   // tRPC Queries
   const activeCoursesQuery = trpc.learning.listModules.useQuery();
@@ -239,6 +325,18 @@ export default function StudentsPage() {
     onError: (err) => toast.error(err.message),
   });
 
+  const updateFeeRulesMutation = trpc.admin.updateStudentFeeRules.useMutation({
+    onSuccess: () => {
+      toast.success("Student fee rules updated successfully!");
+      setIsConfirmingFeeRules(false);
+      profileQuery.refetch();
+      studentsQuery.refetch();
+    },
+    onError: (err) => {
+      toast.error(err.message);
+    },
+  });
+
   const adjustSessionsMutation = trpc.admin.adjustStudentSessions.useMutation({
     onSuccess: () => {
       toast.success("Sessions adjusted successfully");
@@ -251,6 +349,36 @@ export default function StudentsPage() {
 
   const teachersAvailabilityQuery = trpc.students.getTeachersAvailability.useQuery(undefined, {
     enabled: !!detailsStudentId,
+  });
+
+  const teachersQuery = trpc.user.list.useQuery(
+    { role: "teacher", status: "active", limit: 200 },
+    { enabled: isAdmin || isAcademicHead }
+  );
+
+  const batchesQuery = trpc.learning.listBatches.useQuery(undefined);
+
+  const getTeacherName = (id: number | null | undefined) => {
+    if (!id) return "Unassigned";
+    const t = teachersQuery.data?.find((x: any) => x.id === id);
+    return t ? `${t.name} (${t.unionId})` : `Teacher #${id}`;
+  };
+
+  const getBatchName = (id: number | null | undefined) => {
+    if (!id) return "Unassigned";
+    const b = batchesQuery.data?.find((x: any) => x.id === id);
+    return b ? b.name : `Batch #${id}`;
+  };
+
+  const updateClassAllocationMutation = trpc.students.updateClassAllocation.useMutation({
+    onSuccess: () => {
+      toast.success("Class allocation saved successfully!");
+      setIsConfiguringAllocation(false);
+      profileQuery.refetch();
+    },
+    onError: (err) => {
+      toast.error(err.message);
+    },
   });
 
   const updatePackageMutation = trpc.students.updateStudentPackage.useMutation({
@@ -303,6 +431,196 @@ export default function StudentsPage() {
       });
     }
   }, [defaultCountryQuery.data]);
+
+  // Initialize student fee rules state from profile query
+  useEffect(() => {
+    if (profileQuery.data?.student?.profile) {
+      const profile = profileQuery.data.student.profile;
+      const paymentsList = profileQuery.data.payments || [];
+      const paymentType = (profile.paymentOption === "installment" ? "INSTALLMENT" : "FULL_PAYMENT") as "FULL_PAYMENT" | "INSTALLMENT";
+      const totalCourseFee = parseFloat(profile.totalCourseFee || profile.feesTotal || "0");
+      const initialPayment = parseFloat(profile.minInitialPayment || profile.downPayment || "0");
+
+      // Filter and sort tuition payments
+      const tuitionPayments = paymentsList.filter(p => p.type === "tuition");
+      const sortedTuition = [...tuitionPayments].sort((a, b) => (a.installmentNumber || 999) - (b.installmentNumber || 999));
+
+      const installments = sortedTuition.map((p, idx) => ({
+        installmentNumber: p.installmentNumber || (idx + 1),
+        amount: parseFloat(p.amount),
+        dueDate: p.dueDate ? new Date(p.dueDate).toISOString().split("T")[0] : "",
+        status: p.status as "paid" | "unpaid",
+      }));
+
+      setFeeRulesState({
+        paymentType,
+        totalCourseFee,
+        initialPayment,
+        numInstallments: installments.length || 1,
+        installments: installments.length > 0 ? installments : [
+          {
+            installmentNumber: 1,
+            amount: totalCourseFee,
+            dueDate: profile.paymentDueDate ? new Date(profile.paymentDueDate).toISOString().split("T")[0] : "",
+            status: "unpaid",
+          }
+        ],
+      });
+    } else {
+      setFeeRulesState(null);
+    }
+  }, [profileQuery.data]);
+
+  const recalculateStudentFeeRules = () => {
+    if (!feeRulesState) return;
+    const { totalCourseFee, initialPayment, numInstallments, installments } = feeRulesState;
+
+    const paidPayments = installments.filter(i => i.status === "paid");
+    const sumPaid = paidPayments.reduce((sum, p) => sum + p.amount, 0);
+
+    if (totalCourseFee < sumPaid) {
+      toast.error(`Total Course Fee cannot be less than the amount already paid (₹${sumPaid}).`);
+      return;
+    }
+
+    const remaining = totalCourseFee - sumPaid;
+    const numUnpaid = Math.max(1, numInstallments - paidPayments.length);
+
+    let newInstallments = [...paidPayments];
+
+    if (paidPayments.length === 0) {
+      // Case 1: No paid installments yet (student has not paid anything)
+      if (initialPayment > totalCourseFee) {
+        toast.error("Initial payment cannot exceed the total course fee.");
+        return;
+      }
+      
+      // Installment #1 is the initial payment
+      const inst1 = {
+        installmentNumber: 1,
+        amount: initialPayment,
+        dueDate: installments[0]?.dueDate || new Date().toISOString().split("T")[0],
+        status: "unpaid" as const,
+      };
+      newInstallments.push(inst1);
+
+      if (numInstallments > 1) {
+        const remainingUnpaid = numInstallments - 1;
+        const restAmount = totalCourseFee - initialPayment;
+        const base = Math.floor(restAmount / remainingUnpaid);
+        const remainder = restAmount % remainingUnpaid;
+
+        for (let i = 0; i < remainingUnpaid; i++) {
+          const instNo = i + 2;
+          const prevInstDate = newInstallments[newInstallments.length - 1].dueDate;
+          const baseDate = prevInstDate ? new Date(prevInstDate) : new Date();
+          const nextDate = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+          newInstallments.push({
+            installmentNumber: instNo,
+            amount: base + (i === remainingUnpaid - 1 ? remainder : 0),
+            dueDate: nextDate.toISOString().split("T")[0],
+            status: "unpaid" as const,
+          });
+        }
+      } else {
+        // Only 1 installment: adjust its amount to match the total course fee
+        newInstallments[0].amount = totalCourseFee;
+      }
+    } else {
+      // Case 2: There are already paid installments
+      const base = Math.floor(remaining / numUnpaid);
+      const remainder = remaining % numUnpaid;
+
+      // Find the highest installment number in paid payments
+      const maxPaidInstNumber = Math.max(...paidPayments.map(p => p.installmentNumber), 0);
+
+      for (let i = 0; i < numUnpaid; i++) {
+        const instNo = maxPaidInstNumber + i + 1;
+        
+        // Find existing unpaid installment at this index to preserve due date if possible
+        const existingUnpaid = installments.filter(inst => inst.status === "unpaid")[i];
+        let dueDate = existingUnpaid?.dueDate;
+        if (!dueDate) {
+          const prevInstDate = newInstallments[newInstallments.length - 1]?.dueDate;
+          const baseDate = prevInstDate ? new Date(prevInstDate) : new Date();
+          const nextDate = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+          dueDate = nextDate.toISOString().split("T")[0];
+        }
+
+        newInstallments.push({
+          installmentNumber: instNo,
+          amount: base + (i === numUnpaid - 1 ? remainder : 0),
+          dueDate,
+          status: "unpaid" as const,
+        });
+      }
+    }
+
+    // Ensure they are sorted by installment number
+    newInstallments.sort((a, b) => a.installmentNumber - b.installmentNumber);
+
+    setFeeRulesState({
+      ...feeRulesState,
+      installments: newInstallments,
+      numInstallments: newInstallments.length,
+    });
+
+    toast.success("Installments recalculated successfully!");
+  };
+
+  const addFeeRulesInstallmentRow = () => {
+    if (!feeRulesState) return;
+    const { installments } = feeRulesState;
+    const maxInstNo = installments.reduce((max, i) => Math.max(max, i.installmentNumber), 0);
+    const lastInst = installments.find(i => i.installmentNumber === maxInstNo);
+    
+    let nextDateStr = "";
+    if (lastInst?.dueDate) {
+      const lastDate = new Date(lastInst.dueDate);
+      const nextDate = new Date(lastDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+      nextDateStr = nextDate.toISOString().split("T")[0];
+    } else {
+      nextDateStr = new Date().toISOString().split("T")[0];
+    }
+
+    const newInst = {
+      installmentNumber: maxInstNo + 1,
+      amount: 0,
+      dueDate: nextDateStr,
+      status: "unpaid" as const,
+    };
+
+    setFeeRulesState({
+      ...feeRulesState,
+      installments: [...installments, newInst],
+      numInstallments: installments.length + 1,
+    });
+  };
+
+  const removeFeeRulesInstallmentRow = (instNo: number) => {
+    if (!feeRulesState) return;
+    const { installments } = feeRulesState;
+    const target = installments.find(i => i.installmentNumber === instNo);
+    if (target?.status === "paid") {
+      toast.error("Paid installments cannot be deleted.");
+      return;
+    }
+
+    const filtered = installments.filter(i => i.installmentNumber !== instNo);
+    
+    // Re-number installments continuously
+    const renumbered = filtered.map((inst, idx) => ({
+      ...inst,
+      installmentNumber: idx + 1,
+    }));
+
+    setFeeRulesState({
+      ...feeRulesState,
+      installments: renumbered,
+      numInstallments: renumbered.length,
+    });
+  };
 
   // Helper calculation for installments
   const calculateInstallments = (totalFee: number, count: number) => {
@@ -370,9 +688,9 @@ export default function StudentsPage() {
     }
   };
 
-  const resetForm = () => {
-    const defCode = defaultCountryQuery.data?.code || "+91";
-    const defIso = defaultCountryQuery.data?.iso || "IN";
+  const handleCreateOpen = () => {
+    const defCode = "+91";
+    const defIso = "IN";
     setForm({
       name: "",
       countryCode: defCode,
@@ -398,10 +716,26 @@ export default function StudentsPage() {
       notes: "",
       enrollmentId: "",
     });
+    setClassAllocation({
+      oneToOne: {
+        teacherId: "",
+        sessions30: 0,
+        sessions45: 0,
+        sessions60: 0,
+      },
+      group: {
+        teacherId: "",
+        batchId: "",
+        sessions30: 0,
+        sessions45: 0,
+        sessions60: 0,
+      },
+    });
     setIdGenerationType("auto");
     setPaymentType("FULL_PAYMENT");
     setInstallmentCount(2);
     setInstallments([]);
+    setOpen(true);
   };
 
   const handleCreateSubmit = (e: React.FormEvent) => {
@@ -442,6 +776,9 @@ export default function StudentsPage() {
       status: u.status,
       course: u.profile?.course || "",
       batch: u.profile?.batch || "",
+      courseId: u.courseId || "",
+      batchId: u.batchId || "",
+      classAllocation: u.classAllocation || null,
       feesTotal: parseFloat(u.profile?.feesTotal || "0"),
       completionDate: u.profile?.completionDate ? new Date(u.profile.completionDate).toISOString().split("T")[0] : "",
       gender: u.profile?.gender || "",
@@ -466,8 +803,26 @@ export default function StudentsPage() {
       toast.error(error);
       return;
     }
+
+    if (!editStudent.courseId) {
+      toast.error("Course selection is mandatory.");
+      return;
+    }
+    if (!editStudent.batchId) {
+      toast.error("Batch selection is mandatory.");
+      return;
+    }
+
+    const selectedB = batchesQuery.data?.find((b) => b.id === Number(editStudent.batchId));
+    if (selectedB && selectedB.status !== "active") {
+      toast.error("Selected batch is inactive or deleted.");
+      return;
+    }
+
     updateStudentMutation.mutate({
       ...editStudent,
+      courseId: Number(editStudent.courseId),
+      batchId: Number(editStudent.batchId),
       dob: editStudent.dob || null,
       completionDate: editStudent.completionDate || null,
     });
@@ -560,7 +915,7 @@ export default function StudentsPage() {
               </Button>
               <Dialog open={open} onOpenChange={setOpen}>
                 <DialogTrigger asChild>
-                  <Button className="bg-emerald-600 hover:bg-emerald-700 text-white">
+                  <Button onClick={handleCreateOpen} className="bg-emerald-600 hover:bg-emerald-700 text-white">
                     <Plus className="w-4 h-4 mr-2" />
                     Add Student
                   </Button>
@@ -713,14 +1068,31 @@ export default function StudentsPage() {
                               ))}
                             </select>
                           </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600">1-to-1 Sessions Allocated</label>
-                            <Input type="number" value={form.allocatedOneToOneSessions} onChange={(e) => setForm({ ...form, allocatedOneToOneSessions: Number(e.target.value) })} />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600">Group Sessions Allocated</label>
-                            <Input type="number" value={form.allocatedGroupSessions} onChange={(e) => setForm({ ...form, allocatedGroupSessions: Number(e.target.value) })} />
-                          </div>
+                          {form.batchId && (() => {
+                            const selectedBatch = activeBatches.find((b: any) => b.id === Number(form.batchId));
+                            if (!selectedBatch) return null;
+                            const oneToOneCount = (selectedBatch.oneOnOne30Allocated || 0) + (selectedBatch.oneOnOne45Allocated || 0) + (selectedBatch.oneOnOne60Allocated || 0);
+                            const groupCount = (selectedBatch.group30Allocated || 0) + (selectedBatch.group45Allocated || 0) + (selectedBatch.group60Allocated || 0);
+                            return (
+                              <div className="col-span-1 md:col-span-2 p-4 bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 rounded-xl text-xs space-y-2 mt-2">
+                                <p className="font-bold text-emerald-800 dark:text-emerald-400 uppercase tracking-wider text-[10px]">Selected Batch Package Details</p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                  <div className="space-y-1">
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300 block">One-on-One Sessions ({oneToOneCount} total):</span>
+                                    <div className="text-slate-500 dark:text-slate-400 font-mono">
+                                      30m: {selectedBatch.oneOnOne30Allocated || 0} | 45m: {selectedBatch.oneOnOne45Allocated || 0} | 60m: {selectedBatch.oneOnOne60Allocated || 0}
+                                    </div>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300 block">Group Sessions ({groupCount} total):</span>
+                                    <div className="text-slate-500 dark:text-slate-400 font-mono">
+                                      30m: {selectedBatch.group30Allocated || 0} | 45m: {selectedBatch.group45Allocated || 0} | 60m: {selectedBatch.group60Allocated || 0}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
 
@@ -965,131 +1337,269 @@ export default function StudentsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Fee Rules Confirmation Dialog */}
+      <AlertDialog open={isConfirmingFeeRules} onOpenChange={setIsConfirmingFeeRules}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-slate-800 font-bold">
+              <AlertTriangle className="w-5 h-5 text-amber-500" />
+              Confirm Fee Rules Change
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-4 text-xs text-slate-600 mt-2 text-left">
+              <p>You are about to modify the fee rules for this student. This will recalculate their outstanding balance and recreate their future unpaid installments. <strong>Completed payments will remain untouched.</strong></p>
+
+              {feeRulesState && profileQuery.data && (
+                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mt-3 text-xs text-left">
+                  <div className="space-y-2">
+                    <h5 className="font-bold text-gray-500 uppercase tracking-wider text-[10px]">Previous Configuration</h5>
+                    <p><strong>Type:</strong> {profileQuery.data.student.profile?.paymentOption === "installment" ? "Installment" : "Full Payment"}</p>
+                    <p><strong>Total Fee:</strong> ₹{parseFloat(profileQuery.data.student.profile?.totalCourseFee || profileQuery.data.student.profile?.feesTotal || "0").toLocaleString("en-IN")}</p>
+                    <p><strong>Outstanding:</strong> ₹{parseFloat(profileQuery.data.student.profile?.feesBalance || "0").toLocaleString("en-IN")}</p>
+                    <p><strong>Installments:</strong> {profileQuery.data.payments.filter((p: any) => p.type === "tuition").length}</p>
+                  </div>
+
+                  <div className="space-y-2 border-l pl-4">
+                    <h5 className="font-bold text-emerald-600 uppercase tracking-wider text-[10px]">New Configuration</h5>
+                    <p><strong>Type:</strong> {feeRulesState.paymentType === "INSTALLMENT" ? "Installment" : "Full Payment"}</p>
+                    <p><strong>Total Fee:</strong> ₹{feeRulesState.totalCourseFee.toLocaleString("en-IN")}</p>
+                    <p><strong>Outstanding:</strong> ₹{(feeRulesState.totalCourseFee - profileQuery.data.payments.filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</p>
+                    <p><strong>Installments:</strong> {feeRulesState.installments.length}</p>
+                  </div>
+                </div>
+              )}
+
+              {feeRulesState && (
+                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-amber-800 space-y-1 text-left">
+                  <p className="font-semibold">Effect Summary:</p>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    <li>Unpaid future installments recreated: <strong>{feeRulesState.installments.filter(i => i.status === "unpaid").length}</strong></li>
+                    <li>Preserved completed payments: <strong>{feeRulesState.installments.filter(i => i.status === "paid").length}</strong></li>
+                    <li>Updated Outstanding Balance: <strong>₹{(feeRulesState.totalCourseFee - (profileQuery.data?.payments || []).filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</strong></li>
+                  </ul>
+                </div>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+              disabled={updateFeeRulesMutation.isPending}
+              onClick={() => {
+                if (!feeRulesState || !profileQuery.data?.student?.id) return;
+                updateFeeRulesMutation.mutate({
+                  studentId: profileQuery.data.student.id,
+                  paymentType: feeRulesState.paymentType,
+                  totalCourseFee: feeRulesState.totalCourseFee,
+                  initialPayment: feeRulesState.initialPayment,
+                  installments: feeRulesState.installments.map(inst => ({
+                    installmentNumber: inst.installmentNumber,
+                    amount: inst.amount,
+                    dueDate: inst.dueDate ? new Date(inst.dueDate) : null,
+                    status: inst.status,
+                  })),
+                });
+              }}
+            >
+              {updateFeeRulesMutation.isPending ? "Applying..." : "Confirm & Apply"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Edit Student Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader className="pb-2 border-b"><DialogTitle>Edit Student Account</DialogTitle></DialogHeader>
-          {editStudent && (
-            <form onSubmit={handleEditSubmit} className="flex flex-col flex-1 overflow-hidden min-h-0">
-              <div className="flex-1 overflow-y-auto pr-1 py-4 space-y-4 min-h-0">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Full Name</label>
-                    <Input value={editStudent.name} onChange={(e) => setEditStudent({ ...editStudent, name: e.target.value })} />
-                  </div>
-                  <PhoneNumberInput
-                    label="Phone Number"
-                    countryCode={editStudent.countryCode}
-                    countryISO={editStudent.countryISO}
-                    value={editStudent.phoneNumber}
-                    onChange={(data) => setEditStudent({
-                      ...editStudent,
-                      countryCode: data.countryCode,
-                      countryISO: data.countryISO,
-                      phoneNumber: data.phoneNumber
-                    })}
-                  />
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Email Address</label>
-                    <Input value={editStudent.email} onChange={(e) => setEditStudent({ ...editStudent, email: e.target.value })} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Status</label>
-                    <select
-                      className="border rounded h-9 px-3 text-sm bg-white w-full"
-                      value={editStudent.status}
-                      onChange={(e) => setEditStudent({ ...editStudent, status: e.target.value as any })}
-                    >
-                      <option value="active">Active</option>
-                      <option value="inactive">Inactive</option>
-                      <option value="suspended">Suspended</option>
-                      <option value="on_hold">On Hold</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Enrollment ID</label>
-                    <Input
-                      value={editStudent.enrollmentId || ""}
-                      onChange={(e) => setEditStudent({ ...editStudent, enrollmentId: e.target.value.toUpperCase() })}
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Course Name</label>
-                    <Input value={editStudent.course} onChange={(e) => setEditStudent({ ...editStudent, course: e.target.value })} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Batch Name</label>
-                    <Input value={editStudent.batch} onChange={(e) => setEditStudent({ ...editStudent, batch: e.target.value })} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Total Course Fee (₹)</label>
-                    <Input type="number" value={editStudent.feesTotal} onChange={(e) => setEditStudent({ ...editStudent, feesTotal: Number(e.target.value) })} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-gray-600">Course Completion Date</label>
-                    <Input type="date" value={editStudent.completionDate} onChange={(e) => setEditStudent({ ...editStudent, completionDate: e.target.value })} />
-                  </div>
-                </div>
+          {editStudent && (() => {
+            const editCourse = activeCourses.find((c) => c.id === Number(editStudent.courseId));
+            const editCourseBatches = editCourse?.batches?.filter((b: any) => b.status === "active") || [];
+            const selectedEditBatch = batchesQuery.data?.find((b) => b.id === Number(editStudent.batchId));
+            const editAvailableSeats = selectedEditBatch
+              ? Math.max(0, (selectedEditBatch.maxStudents || 30) - (selectedEditBatch.enrollments?.length || 0))
+              : 0;
 
-                <div className="pt-2 border-t mt-2">
-                  <h4 className="text-xs font-bold text-gray-700 mb-2">Personal & Parent Info</h4>
+            let editClassType = "-";
+            let editSessionDuration = "-";
+
+            if (selectedEditBatch) {
+              editClassType = "Group Session";
+              const allocation = editStudent.classAllocation;
+              if (allocation) {
+                if ((allocation.group?.sessions30 || 0) > 0) {
+                  editSessionDuration = "30 min";
+                } else if ((allocation.group?.sessions60 || 0) > 0) {
+                  editSessionDuration = "60 min";
+                } else {
+                  editSessionDuration = "45 min";
+                }
+              } else {
+                editSessionDuration = "45 min";
+              }
+            }
+
+            return (
+              <form onSubmit={handleEditSubmit} className="flex flex-col flex-1 overflow-hidden min-h-0">
+                <div className="flex-1 overflow-y-auto pr-1 py-4 space-y-4 min-h-0">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="space-y-1">
-                        <label className="text-xs text-gray-500">Gender</label>
-                        <select
-                          className="border rounded h-9 px-3 text-sm bg-white w-full"
-                          value={editStudent.gender}
-                          onChange={(e) => setEditStudent({ ...editStudent, gender: e.target.value })}
-                        >
-                          <option value="">Select</option>
-                          <option value="male">Male</option>
-                          <option value="female">Female</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-xs text-gray-500">DOB</label>
-                        <Input type="date" value={editStudent.dob} onChange={(e) => setEditStudent({ ...editStudent, dob: e.target.value })} />
-                      </div>
-                    </div>
                     <div className="space-y-1">
-                      <label className="text-xs text-gray-500">Educational Qualification</label>
-                      <Input value={editStudent.educationalQualification} onChange={(e) => setEditStudent({ ...editStudent, educationalQualification: e.target.value })} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs text-gray-500">Parent/Guardian Name</label>
-                      <Input value={editStudent.parentName} onChange={(e) => setEditStudent({ ...editStudent, parentName: e.target.value })} />
+                      <label className="text-xs font-semibold text-gray-600">Full Name</label>
+                      <Input value={editStudent.name} onChange={(e) => setEditStudent({ ...editStudent, name: e.target.value })} />
                     </div>
                     <PhoneNumberInput
-                      label="Parent Phone Number"
-                      countryCode={editStudent.parentCountryCode}
-                      countryISO={editStudent.parentCountryISO}
-                      value={editStudent.parentPhoneNumber}
-                      placeholder="Parent Phone"
+                      label="Phone Number"
+                      countryCode={editStudent.countryCode}
+                      countryISO={editStudent.countryISO}
+                      value={editStudent.phoneNumber}
                       onChange={(data) => setEditStudent({
                         ...editStudent,
-                        parentCountryCode: data.countryCode,
-                        parentCountryISO: data.countryISO,
-                        parentPhoneNumber: data.phoneNumber,
-                        parentPhone: data.fullNumber
+                        countryCode: data.countryCode,
+                        countryISO: data.countryISO,
+                        phoneNumber: data.phoneNumber
                       })}
                     />
-                    <div className="space-y-1 sm:col-span-2">
-                      <label className="text-xs text-gray-500">Admin Notes</label>
-                      <Textarea value={editStudent.notes} onChange={(e) => setEditStudent({ ...editStudent, notes: e.target.value })} rows={2} />
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Email Address</label>
+                      <Input value={editStudent.email} onChange={(e) => setEditStudent({ ...editStudent, email: e.target.value })} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Status</label>
+                      <select
+                        className="border rounded h-9 px-3 text-sm bg-white w-full"
+                        value={editStudent.status}
+                        onChange={(e) => setEditStudent({ ...editStudent, status: e.target.value as any })}
+                      >
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                        <option value="suspended">Suspended</option>
+                        <option value="on_hold">On Hold</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Enrollment ID</label>
+                      <Input
+                        value={editStudent.enrollmentId || ""}
+                        onChange={(e) => setEditStudent({ ...editStudent, enrollmentId: e.target.value.toUpperCase() })}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Course / Module *</label>
+                      <select
+                        className="border rounded h-9 px-3 text-sm bg-white w-full dark:bg-gray-800 dark:border-gray-700"
+                        value={editStudent.courseId}
+                        onChange={(e) => setEditStudent({ ...editStudent, courseId: e.target.value ? Number(e.target.value) : "", batchId: "" })}
+                        required
+                      >
+                        <option value="">Select Existing Course</option>
+                        {activeCourses.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Batch *</label>
+                      <select
+                        className="border rounded h-9 px-3 text-sm bg-white w-full dark:bg-gray-800 dark:border-gray-700"
+                        value={editStudent.batchId}
+                        onChange={(e) => setEditStudent({ ...editStudent, batchId: e.target.value ? Number(e.target.value) : "" })}
+                        required
+                      >
+                        <option value="">Select Existing Batch</option>
+                        {editCourseBatches.map((b: any) => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Teacher (Read Only)</label>
+                      <Input value={selectedEditBatch?.teacher?.name || "Not assigned"} disabled className="bg-gray-50 dark:bg-gray-900 cursor-not-allowed" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Class Type (Read Only)</label>
+                      <Input value={selectedEditBatch ? editClassType : ""} disabled className="bg-gray-50 dark:bg-gray-900 cursor-not-allowed" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Session Duration (Read Only)</label>
+                      <Input value={selectedEditBatch ? editSessionDuration : ""} disabled className="bg-gray-50 dark:bg-gray-900 cursor-not-allowed" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Available Seats</label>
+                      <Input value={selectedEditBatch ? `${editAvailableSeats} / ${selectedEditBatch.maxStudents || 30}` : ""} disabled className="bg-gray-50 dark:bg-gray-900 cursor-not-allowed" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Batch Status</label>
+                      <Input value={selectedEditBatch?.status || ""} disabled className="bg-gray-50 dark:bg-gray-900 cursor-not-allowed capitalize" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Total Course Fee (₹)</label>
+                      <Input type="number" value={editStudent.feesTotal} onChange={(e) => setEditStudent({ ...editStudent, feesTotal: Number(e.target.value) })} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-gray-600">Course Completion Date</label>
+                      <Input type="date" value={editStudent.completionDate} onChange={(e) => setEditStudent({ ...editStudent, completionDate: e.target.value })} />
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t mt-2">
+                    <h4 className="text-xs font-bold text-gray-700 mb-2">Personal & Parent Info</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className="text-xs text-gray-500">Gender</label>
+                          <select
+                            className="border rounded h-9 px-3 text-sm bg-white w-full"
+                            value={editStudent.gender}
+                            onChange={(e) => setEditStudent({ ...editStudent, gender: e.target.value })}
+                          >
+                            <option value="">Select</option>
+                            <option value="male">Male</option>
+                            <option value="female">Female</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs text-gray-500">DOB</label>
+                          <Input type="date" value={editStudent.dob} onChange={(e) => setEditStudent({ ...editStudent, dob: e.target.value })} />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-500">Educational Qualification</label>
+                        <Input value={editStudent.educationalQualification} onChange={(e) => setEditStudent({ ...editStudent, educationalQualification: e.target.value })} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-500">Parent/Guardian Name</label>
+                        <Input value={editStudent.parentName} onChange={(e) => setEditStudent({ ...editStudent, parentName: e.target.value })} />
+                      </div>
+                      <PhoneNumberInput
+                        label="Parent Phone Number"
+                        countryCode={editStudent.parentCountryCode}
+                        countryISO={editStudent.parentCountryISO}
+                        value={editStudent.parentPhoneNumber}
+                        placeholder="Parent Phone"
+                        onChange={(data) => setEditStudent({
+                          ...editStudent,
+                          parentCountryCode: data.countryCode,
+                          parentCountryISO: data.countryISO,
+                          parentPhoneNumber: data.phoneNumber,
+                          parentPhone: data.fullNumber
+                        })}
+                      />
+                      <div className="space-y-1 sm:col-span-2">
+                        <label className="text-xs text-gray-500">Admin Notes</label>
+                        <Textarea value={editStudent.notes} onChange={(e) => setEditStudent({ ...editStudent, notes: e.target.value })} rows={2} />
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-              <div className="pt-4 border-t mt-4">
-                <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white" disabled={updateStudentMutation.isPending}>
-                  {updateStudentMutation.isPending ? "Saving changes..." : "Save Student Changes"}
-                </Button>
-              </div>
-            </form>
-          )}
+                <div className="pt-4 border-t mt-4">
+                  <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white" disabled={updateStudentMutation.isPending}>
+                    {updateStudentMutation.isPending ? "Saving changes..." : "Save Student Changes"}
+                  </Button>
+                </div>
+              </form>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
@@ -1166,10 +1676,9 @@ export default function StudentsPage() {
                 <TabsContent value="course" className="space-y-6 outline-none">
                   {(() => {
                     const activeEnrollment = profileQuery.data.enrollments?.find((e: any) => e.status === "active") || profileQuery.data.enrollments?.[0];
-                    const teachersAvailability = teachersAvailabilityQuery.data || [];
                     const classHistory = profileQuery.data.classHistory || [];
                     const auditLogs = profileQuery.data.studentCourseAuditLogs || [];
-                    const config = profileQuery.data.student.profile?.packageConfig as any;
+                    const classAllocation = profileQuery.data.classAllocation;
 
                     // Calculate stats
                     const completedCount = classHistory.filter((c: any) => c.status === "completed").length;
@@ -1178,534 +1687,82 @@ export default function StudentsPage() {
                     const totalAllocated = profileQuery.data.student.profile?.totalAllocatedSessions || 0;
                     const totalRemaining = profileQuery.data.student.profile?.totalRemainingSessions || 0;
                     const pct = totalAllocated > 0 ? Math.min(100, Math.round((completedCount / totalAllocated) * 100)) : 0;
-
-                    // Teacher Names helper
-                    const teacherNames = activeEnrollment?.resolvedTeachers?.length > 0 
-                      ? activeEnrollment.resolvedTeachers.map((t: any) => t.name).join(", ") 
-                      : (activeEnrollment?.batch?.teacher?.name || "Unassigned");
-
-                    // Start Date & End Date helpers
-                    const startDateStr = activeEnrollment?.batch?.startDate 
-                      ? new Date(activeEnrollment.batch.startDate).toLocaleDateString() 
-                      : (profileQuery.data.student.profile?.admissionDate 
-                        ? new Date(profileQuery.data.student.profile.admissionDate).toLocaleDateString() 
-                        : "-");
-
-                    const getEndDate = (startDate: any, durationStr: string) => {
-                      if (!startDate) return "-";
-                      const date = new Date(startDate);
-                      const durMatch = durationStr?.match(/(\d+)\s*(month|week|day)/i);
-                      if (durMatch) {
-                        const num = parseInt(durMatch[1]);
-                        const unit = durMatch[2].toLowerCase();
-                        if (unit.startsWith("month")) date.setMonth(date.getMonth() + num);
-                        else if (unit.startsWith("week")) date.setDate(date.getDate() + num * 7);
-                        else if (unit.startsWith("day")) date.setDate(date.getDate() + num);
-                      } else {
-                        date.setMonth(date.getMonth() + 3);
-                      }
-                      return date.toLocaleDateString();
-                    };
-
-                    const endDateStr = activeEnrollment?.batch?.startDate 
-                      ? getEndDate(activeEnrollment.batch.startDate, activeEnrollment.batch.duration || "3 months")
-                      : "-";
-
                     return (
                       <div className="space-y-6">
-                        {/* 1. Course Information & Batch Control */}
-                        <Card className="border-slate-200/80 shadow-sm overflow-hidden">
-                          <CardHeader className="bg-slate-50 border-b py-3 px-4 flex flex-row items-center justify-between">
+                        {/* Course & Batch Payment Details Card */}
+                        <Card className="border-slate-200/80 shadow-sm overflow-hidden bg-slate-50/50">
+                          <CardHeader className="bg-slate-50 border-b py-3 px-4">
                             <div className="flex items-center gap-2">
-                              <BookOpen className="w-4 h-4 text-emerald-600" />
-                              <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-700">Course Information</CardTitle>
+                              <GraduationCap className="w-4 h-4 text-emerald-600" />
+                              <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-700">Course & Fee Enrollment Details</CardTitle>
                             </div>
-                            {isAdmin && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 text-xs border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
-                                onClick={() => {
-                                  if (!batchChangeMode) {
-                                    setNewBatchCourseId(activeEnrollment?.batch?.moduleId || "");
-                                    setNewBatchId(activeEnrollment?.batchId || "");
-                                  }
-                                  setBatchChangeMode(!batchChangeMode);
-                                }}
-                              >
-                                {batchChangeMode ? "Cancel Change" : "Change Batch / Course"}
-                              </Button>
-                            )}
                           </CardHeader>
-                          <CardContent className="p-4">
-                            {batchChangeMode ? (
-                              <div className="space-y-4">
-                                <h4 className="text-sm font-semibold text-slate-800">Transfer Student to New Batch</h4>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                  <div className="space-y-1">
-                                    <label className="text-xs font-semibold text-slate-500">Select New Course</label>
-                                    <select
-                                      value={newBatchCourseId}
-                                      onChange={(e) => {
-                                        setNewBatchCourseId(e.target.value ? Number(e.target.value) : "");
-                                        setNewBatchId("");
-                                      }}
-                                      className="w-full rounded-lg border border-slate-200 p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                    >
-                                      <option value="">Select Course</option>
-                                      {activeCoursesQuery.data?.map((c: any) => (
-                                        <option key={c.id} value={c.id}>{c.name}</option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                  <div className="space-y-1">
-                                    <label className="text-xs font-semibold text-slate-500">Select New Batch</label>
-                                    <select
-                                      value={newBatchId}
-                                      onChange={(e) => setNewBatchId(e.target.value ? Number(e.target.value) : "")}
-                                      className="w-full rounded-lg border border-slate-200 p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                      disabled={!newBatchCourseId}
-                                    >
-                                      <option value="">Select Batch</option>
-                                      {(activeCoursesQuery.data?.find((c: any) => c.id === newBatchCourseId)?.batches?.filter((b: any) => b.status === "active") || []).map((b: any) => (
-                                        <option key={b.id} value={b.id}>{b.name} ({b.timeSlot || "No Time"})</option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                </div>
-                                <div className="flex gap-2 justify-end">
-                                  <Button size="sm" variant="outline" onClick={() => setBatchChangeMode(false)}>Cancel</Button>
-                                  <Button 
-                                    size="sm" 
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white" 
-                                    disabled={changeBatchMutation.isPending || !newBatchId}
-                                    onClick={() => changeBatchMutation.mutate({ studentId: profileQuery.data.student.id, newBatchId: Number(newBatchId) })}
-                                  >
-                                    {changeBatchMutation.isPending ? "Transferring..." : "Confirm Batch Change"}
-                                  </Button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Course Name</p>
-                                  <p className="font-semibold text-slate-800">{activeEnrollment?.batch?.module?.name || profileQuery.data.student.profile?.course || "-"}</p>
-                                </div>
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Batch Name</p>
-                                  <p className="font-semibold text-slate-800">{activeEnrollment?.batch?.name || profileQuery.data.student.profile?.batch || "-"}</p>
-                                </div>
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Assigned Teacher(s)</p>
-                                  <p className="font-semibold text-slate-800">{teacherNames}</p>
-                                </div>
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Course Start Date</p>
-                                  <p className="font-semibold text-slate-800">{startDateStr}</p>
-                                </div>
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Course End Date</p>
-                                  <p className="font-semibold text-slate-800">{endDateStr}</p>
-                                </div>
-                                <div className="space-y-0.5">
-                                  <p className="text-xs text-gray-400 font-semibold">Course Status</p>
-                                  <div>
-                                    <Badge className={`capitalize font-bold ${
-                                      activeEnrollment?.status === "active"
-                                        ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
-                                        : activeEnrollment?.status === "restricted"
-                                          ? "bg-amber-100 text-amber-700 hover:bg-amber-100"
-                                          : "bg-slate-100 text-slate-600 hover:bg-slate-100"
-                                    }`}>
-                                      {activeEnrollment?.status || "inactive"}
-                                    </Badge>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
+                          <CardContent className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-slate-600">
+                            <div className="space-y-2">
+                              <p><strong>Course:</strong> {activeEnrollment?.batch?.module?.name || profileQuery.data.student.profile?.course || "-"}</p>
+                              <p><strong>Batch:</strong> {activeEnrollment?.batch?.name || profileQuery.data.student.profile?.batch || "-"}</p>
+                              <p><strong>Enrollment Source:</strong> <span className="font-semibold text-emerald-700">{getEnrollmentSourceLabel(profileQuery.data.student.registrationSource)}</span></p>
+                              <p><strong>Payment Option:</strong> <span className="capitalize">{profileQuery.data.student.profile?.paymentOption?.replace('_', ' ') || "Full Payment"}</span></p>
+                            </div>
+                            <div className="space-y-2">
+                              <p><strong>Course Fee:</strong> ₹{parseFloat(profileQuery.data.student.profile?.totalCourseFee || profileQuery.data.student.profile?.feesTotal || "0").toLocaleString("en-IN")}</p>
+                              <p><strong>Paid Amount:</strong> ₹{parseFloat(profileQuery.data.student.profile?.feesPaid || "0").toLocaleString("en-IN")}</p>
+                              <p><strong>Remaining Balance:</strong> ₹{parseFloat(profileQuery.data.student.profile?.remainingBalance || profileQuery.data.student.profile?.feesBalance || "0").toLocaleString("en-IN")}</p>
+                              <p className="flex items-center">
+                                <strong>Payment Status:</strong> 
+                                <Badge className={`ml-2 capitalize font-bold ${
+                                  profileQuery.data.student.profile?.paymentStatus === "paid"
+                                    ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
+                                    : profileQuery.data.student.profile?.paymentStatus === "partial"
+                                      ? "bg-amber-100 text-amber-700 hover:bg-amber-100"
+                                      : "bg-red-100 text-red-700 hover:bg-red-100"
+                                }`}>
+                                  {profileQuery.data.student.profile?.paymentStatus === "paid" ? "Paid" : profileQuery.data.student.profile?.paymentStatus === "partial" ? "Partial Paid" : "Unpaid"}
+                                </Badge>
+                              </p>
+                            </div>
                           </CardContent>
                         </Card>
 
-                        {/* 2. Class Allocation & Package Details */}
-                        <Card className="border-slate-200/80 shadow-sm overflow-hidden">
-                          <CardHeader className="bg-slate-50 border-b py-3 px-4 flex flex-row items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Settings className="w-4 h-4 text-emerald-600" />
-                              <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-700">Class Allocation & Package Details</CardTitle>
-                            </div>
-                            {isAdmin && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 text-xs border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
-                                onClick={() => {
-                                  if (!packageEditMode) {
-                                    setPackageForm({
-                                      oneToOne: {
-                                        total: config?.oneToOne?.total ?? profileQuery.data.student.profile?.allocatedOneToOneSessions ?? 0,
-                                        min30: config?.oneToOne?.min30 ?? 0,
-                                        min45: config?.oneToOne?.min45 ?? 0,
-                                        min60: config?.oneToOne?.min60 ?? 0,
-                                      },
-                                      group: {
-                                        total: config?.group?.total ?? profileQuery.data.student.profile?.allocatedGroupSessions ?? 0,
-                                        min30: config?.group?.min30 ?? 0,
-                                        min45: config?.group?.min45 ?? 0,
-                                        min60: config?.group?.min60 ?? 0,
-                                      }
-                                    });
-                                  }
-                                  setPackageEditMode(!packageEditMode);
-                                }}
-                              >
-                                {packageEditMode ? "Cancel Edit" : "Configure Package"}
-                              </Button>
-                            )}
-                          </CardHeader>
-                          <CardContent className="p-4">
-                            {packageEditMode ? (
-                              <div className="space-y-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                  {/* One-to-One edit block */}
-                                  <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-                                    <h4 className="font-semibold text-xs text-slate-700 uppercase tracking-wider">One-to-One Sessions</h4>
-                                    <div className="space-y-1">
-                                      <label className="text-xs text-slate-500 font-medium">Total One-to-One Classes</label>
-                                      <Input
-                                        type="number"
-                                        className="h-9 bg-white"
-                                        value={packageForm.oneToOne.total}
-                                        onChange={(e) => setPackageForm({
-                                          ...packageForm,
-                                          oneToOne: { ...packageForm.oneToOne, total: Number(e.target.value) }
-                                        })}
-                                      />
-                                    </div>
-                                    <div className="grid grid-cols-3 gap-2">
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">30 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.oneToOne.min30}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            oneToOne: { ...packageForm.oneToOne, min30: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">45 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.oneToOne.min45}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            oneToOne: { ...packageForm.oneToOne, min45: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">60 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.oneToOne.min60}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            oneToOne: { ...packageForm.oneToOne, min60: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                    </div>
-                                    <p className="text-[10px] text-right font-medium text-slate-500">
-                                      Sum: {packageForm.oneToOne.min30 + packageForm.oneToOne.min45 + packageForm.oneToOne.min60} / {packageForm.oneToOne.total}
-                                    </p>
-                                  </div>
-
-                                  {/* Group edit block */}
-                                  <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-                                    <h4 className="font-semibold text-xs text-slate-700 uppercase tracking-wider">Group Sessions</h4>
-                                    <div className="space-y-1">
-                                      <label className="text-xs text-slate-500 font-medium">Total Group Classes</label>
-                                      <Input
-                                        type="number"
-                                        className="h-9 bg-white"
-                                        value={packageForm.group.total}
-                                        onChange={(e) => setPackageForm({
-                                          ...packageForm,
-                                          group: { ...packageForm.group, total: Number(e.target.value) }
-                                        })}
-                                      />
-                                    </div>
-                                    <div className="grid grid-cols-3 gap-2">
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">30 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.group.min30}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            group: { ...packageForm.group, min30: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">45 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.group.min45}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            group: { ...packageForm.group, min45: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] text-slate-400 font-semibold uppercase">60 Min Classes</label>
-                                        <Input
-                                          type="number"
-                                          className="h-8 text-xs bg-white"
-                                          value={packageForm.group.min60}
-                                          onChange={(e) => setPackageForm({
-                                            ...packageForm,
-                                            group: { ...packageForm.group, min60: Number(e.target.value) }
-                                          })}
-                                        />
-                                      </div>
-                                    </div>
-                                    <p className="text-[10px] text-right font-medium text-slate-500">
-                                      Sum: {packageForm.group.min30 + packageForm.group.min45 + packageForm.group.min60} / {packageForm.group.total}
-                                    </p>
-                                  </div>
-                                </div>
-
-                                <div className="flex gap-2 justify-end">
-                                  <Button size="sm" variant="outline" onClick={() => setPackageEditMode(false)}>Cancel</Button>
-                                  <Button
-                                    size="sm"
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                                    disabled={updatePackageMutation.isPending}
-                                    onClick={() => {
-                                      const o2oSum = packageForm.oneToOne.min30 + packageForm.oneToOne.min45 + packageForm.oneToOne.min60;
-                                      const gSum = packageForm.group.min30 + packageForm.group.min45 + packageForm.group.min60;
-                                      if (o2oSum !== packageForm.oneToOne.total) {
-                                        toast.error("One-to-One split sum does not match One-to-One total.");
-                                        return;
-                                      }
-                                      if (gSum !== packageForm.group.total) {
-                                        toast.error("Group split sum does not match Group total.");
-                                        return;
-                                      }
-                                      updatePackageMutation.mutate({
-                                        studentId: profileQuery.data.student.id,
-                                        packageConfig: packageForm,
-                                      });
-                                    }}
-                                  >
-                                    {updatePackageMutation.isPending ? "Saving..." : "Save Package Config"}
-                                  </Button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/30">
-                                  <h4 className="font-bold text-xs text-slate-600 uppercase tracking-wider mb-2">One-to-One Sessions Breakdowns</h4>
-                                  <div className="space-y-1 text-sm">
-                                    <div className="flex justify-between border-b pb-1 border-slate-100">
-                                      <span className="text-gray-500">Allocated One-to-One</span>
-                                      <span className="font-bold text-slate-800">{profileQuery.data.student.profile?.allocatedOneToOneSessions ?? 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs pt-1">
-                                      <span className="text-gray-400">30 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.oneToOne?.min30 || 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-gray-400">45 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.oneToOne?.min45 || 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-gray-400">60 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.oneToOne?.min60 || 0} Classes</span>
-                                    </div>
-                                  </div>
-                                </div>
-
-                                <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/30">
-                                  <h4 className="font-bold text-xs text-slate-600 uppercase tracking-wider mb-2">Group Sessions Breakdowns</h4>
-                                  <div className="space-y-1 text-sm">
-                                    <div className="flex justify-between border-b pb-1 border-slate-100">
-                                      <span className="text-gray-500">Allocated Group</span>
-                                      <span className="font-bold text-slate-800">{profileQuery.data.student.profile?.allocatedGroupSessions ?? 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs pt-1">
-                                      <span className="text-gray-400">30 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.group?.min30 || 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-gray-400">45 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.group?.min45 || 0} Classes</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-gray-400">60 Min Sessions</span>
-                                      <span className="font-semibold text-slate-700">{config?.group?.min60 || 0} Classes</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </CardContent>
-                        </Card>
-
-                        {/* 3. Teacher Assignment */}
-                        <Card className="border-slate-200/80 shadow-sm overflow-hidden">
-                          <CardHeader className="bg-slate-50 border-b py-3 px-4 flex flex-row items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <User className="w-4 h-4 text-emerald-600" />
-                              <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-700">Teacher Assignment Management</CardTitle>
-                            </div>
-                            {isAdmin && activeEnrollment && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 text-xs border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
-                                onClick={() => {
-                                  if (!teacherAssignMode) {
-                                    const currentIds = activeEnrollment.assignedTeachers && Array.isArray(activeEnrollment.assignedTeachers)
-                                      ? activeEnrollment.assignedTeachers as number[]
-                                      : [];
-                                    setAssignTeachersForm(currentIds);
-                                    teachersAvailabilityQuery.refetch();
-                                  }
-                                  setTeacherAssignMode(!teacherAssignMode);
-                                }}
-                              >
-                                {teacherAssignMode ? "Cancel" : "Manage Teachers"}
-                              </Button>
-                            )}
-                          </CardHeader>
-                          <CardContent className="p-4">
-                            {teacherAssignMode ? (
-                              <div className="space-y-4">
-                                <h4 className="text-sm font-semibold text-slate-800">Assign Multiple Teachers for Enrolled Course</h4>
-                                {teachersAvailabilityQuery.isLoading ? (
-                                  <p className="text-xs text-slate-400 text-center py-4">Loading active teachers...</p>
-                                ) : (
-                                  <div className="border border-slate-100 rounded-lg bg-white overflow-hidden text-xs max-h-60 overflow-y-auto">
-                                    <Table>
-                                      <TableHeader className="bg-slate-50">
-                                        <TableRow>
-                                          <TableHead className="w-12 text-center">Select</TableHead>
-                                          <TableHead>Teacher Name</TableHead>
-                                          <TableHead className="text-center">Active Students</TableHead>
-                                          <TableHead className="text-center">Assigned Sessions</TableHead>
-                                          <TableHead className="text-center">Workload Status</TableHead>
-                                        </TableRow>
-                                      </TableHeader>
-                                      <TableBody>
-                                        {teachersAvailability.map((t: any) => {
-                                          const isChecked = assignTeachersForm.includes(t.id);
-                                          const overLimit = t.activeStudentsCount >= 15;
-                                          return (
-                                            <TableRow key={t.id} className={isChecked ? "bg-slate-50/50" : ""}>
-                                              <TableCell className="text-center">
-                                                <input
-                                                  type="checkbox"
-                                                  checked={isChecked}
-                                                  onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                      setAssignTeachersForm([...assignTeachersForm, t.id]);
-                                                    } else {
-                                                      setAssignTeachersForm(assignTeachersForm.filter(id => id !== t.id));
-                                                    }
-                                                  }}
-                                                  className="w-3.5 h-3.5 text-emerald-600 focus:ring-emerald-500 border-slate-300 rounded"
-                                                />
-                                              </TableCell>
-                                              <TableCell className="font-semibold text-slate-800 flex flex-col justify-center">
-                                                <span>{t.name}</span>
-                                                {overLimit && isChecked && (
-                                                  <span className="text-[9px] text-amber-600 font-bold flex items-center gap-0.5 mt-0.5">
-                                                    <AlertTriangle className="w-3 h-3 text-amber-500" /> Over capacity warning (&gt;15 students)
-                                                  </span>
-                                                )}
-                                              </TableCell>
-                                              <TableCell className="text-center font-mono">{t.activeStudentsCount} / 15</TableCell>
-                                              <TableCell className="text-center font-mono">{t.assignedSessionsCount}</TableCell>
-                                              <TableCell className="text-center">
-                                                <Badge className={`font-bold ${
-                                                  t.availabilityStatus === "Overloaded"
-                                                    ? "bg-red-100 text-red-700"
-                                                    : t.availabilityStatus === "Busy"
-                                                      ? "bg-amber-100 text-amber-700"
-                                                      : "bg-emerald-100 text-emerald-700"
-                                                }`}>
-                                                  {t.availabilityStatus}
-                                                </Badge>
-                                              </TableCell>
-                                            </TableRow>
-                                          );
-                                        })}
-                                        {teachersAvailability.length === 0 && (
-                                          <TableRow>
-                                            <TableCell colSpan={5} className="text-center text-slate-400 py-6">
-                                              No active teachers found.
-                                            </TableCell>
-                                          </TableRow>
-                                        )}
-                                      </TableBody>
-                                    </Table>
-                                  </div>
-                                )}
-                                <div className="flex gap-2 justify-end">
-                                  <Button size="sm" variant="outline" onClick={() => setTeacherAssignMode(false)}>Cancel</Button>
-                                  <Button
-                                    size="sm"
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                                    disabled={updateTeacherAssignmentMutation.isPending}
-                                    onClick={() => {
-                                      updateTeacherAssignmentMutation.mutate({
-                                        studentId: profileQuery.data.student.id,
-                                        enrollmentId: activeEnrollment.id,
-                                        teacherIds: assignTeachersForm
-                                      });
-                                    }}
-                                  >
-                                    {updateTeacherAssignmentMutation.isPending ? "Saving..." : "Save Teacher Assignment"}
-                                  </Button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="space-y-4">
-                                <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/30">
-                                  <div className="flex items-start gap-4">
-                                    <div className="bg-emerald-50 text-emerald-700 p-2.5 rounded-lg">
-                                      <User className="w-5 h-5" />
-                                    </div>
-                                    <div className="space-y-1">
-                                      <p className="text-xs text-gray-400 font-semibold uppercase tracking-wider">Assigned Teacher(s) for Student</p>
-                                      <p className="text-base font-bold text-slate-800">{teacherNames}</p>
-                                      {activeEnrollment?.resolvedTeachers && activeEnrollment.resolvedTeachers.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1.5 mt-2">
-                                          {activeEnrollment.resolvedTeachers.map((t: any) => (
-                                            <Badge key={t.id} variant="outline" className="bg-white border-slate-200 text-xs font-semibold px-2 py-0.5 text-slate-700">
-                                              {t.name}
-                                            </Badge>
-                                          ))}
-                                        </div>
-                                      ) : (
-                                        <p className="text-xs text-gray-400 italic mt-0.5">Assigned to batch default teacher</p>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </CardContent>
-                        </Card>
+                        {/* 1. Class Allocation Summary */}
+                        <ClassAllocationSummary
+                          allocation={classAllocation || {
+                            oneToOne: { teacherId: null, sessions30: 0, sessions45: 0, sessions60: 0, completed30: 0, completed45: 0, completed60: 0, remaining30: 0, remaining45: 0, remaining60: 0 },
+                            group: { teacherId: null, batchId: null, sessions30: 0, sessions45: 0, sessions60: 0, completed30: 0, completed45: 0, completed60: 0, remaining30: 0, remaining45: 0, remaining60: 0 }
+                          }}
+                          oneToOneTeacherName={getTeacherName(classAllocation?.oneToOne?.teacherId)}
+                          groupTeacherName={getTeacherName(classAllocation?.group?.teacherId)}
+                          groupBatchName={getBatchName(classAllocation?.group?.batchId)}
+                          batchName={activeEnrollment?.batch?.name}
+                          moduleName={activeEnrollment?.batch?.module?.name}
+                          isAdmin={isAdmin}
+                          onConfigureClick={() => {
+                            const alloc = classAllocation || {
+                              oneToOne: { teacherId: "", sessions30: 0, sessions45: 0, sessions60: 0 },
+                              group: { teacherId: "", batchId: "", sessions30: 0, sessions45: 0, sessions60: 0 }
+                            };
+                            setTempAllocation({
+                              oneToOne: {
+                                teacherId: alloc.oneToOne?.teacherId ?? "",
+                                sessions30: alloc.oneToOne?.sessions30 ?? 0,
+                                sessions45: alloc.oneToOne?.sessions45 ?? 0,
+                                sessions60: alloc.oneToOne?.sessions60 ?? 0,
+                              },
+                              group: {
+                                teacherId: alloc.group?.teacherId ?? "",
+                                batchId: (alloc.group?.batchId as any) ?? "",
+                                sessions30: alloc.group?.sessions30 ?? 0,
+                                sessions45: alloc.group?.sessions45 ?? 0,
+                                sessions60: alloc.group?.sessions60 ?? 0,
+                              }
+                            });
+                            setIsConfiguringAllocation(true);
+                          }}
+                          onAdjustClick={(type) => {
+                            setAdjustType(type);
+                            setIsAdjustingBalance(true);
+                          }}
+                        />
 
                         {/* 4. Live Tracking (Progress) */}
                         <Card className="border-slate-200/80 shadow-sm overflow-hidden">
@@ -1990,39 +2047,285 @@ export default function StudentsPage() {
                       </CardContent>
                     </Card>
 
-                    {/* Adjust Fees Card (Admin only) */}
-                    {isAdmin && (
-                      <Card className="border border-dashed border-slate-200 bg-slate-50/50 p-4 flex flex-col justify-between">
-                        <div className="space-y-4">
-                          <h4 className="font-bold text-xs text-slate-800 uppercase tracking-wider">Configure Student Fee Rules</h4>
-                          <div className="space-y-2">
-                            <div className="space-y-1">
-                              <label className="text-xs text-gray-500">Minimum Initial Payment (₹)</label>
-                              <Input
-                                type="number"
-                                value={feeForm.minInitialPayment}
-                                onChange={(e) => setFeeForm({ ...feeForm, minInitialPayment: Number(e.target.value) })}
-                              />
-                            </div>
-                            <div className="space-y-1">
-                              <label className="text-xs text-gray-500">Payment Due Date</label>
-                              <Input
-                                type="date"
-                                value={feeForm.paymentDueDate}
-                                onChange={(e) => setFeeForm({ ...feeForm, paymentDueDate: e.target.value })}
-                              />
-                            </div>
+                    {/* Student Fee Rules Card (Admin only) */}
+                    {isAdmin && feeRulesState && (
+                      <Card className="col-span-1 md:col-span-2 border border-slate-200 bg-slate-50/50 p-6 space-y-6">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b pb-4">
+                          <div>
+                            <h4 className="font-bold text-sm text-slate-800 uppercase tracking-wider">Configure Student Fee Rules</h4>
+                            <p className="text-xs text-gray-500 mt-1">Manage payment options, total fees, initial payments, and custom installment schedules.</p>
+                          </div>
+                          <Badge className="bg-slate-200 text-slate-700 hover:bg-slate-200 font-bold capitalize mt-2 sm:mt-0 text-[10px]">
+                            {feeRulesState.paymentType.replace("_", " ").toLowerCase()}
+                          </Badge>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-gray-600">Payment Type</label>
+                            <select
+                              className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500 outline-none"
+                              value={feeRulesState.paymentType}
+                              onChange={(e) => {
+                                const newType = e.target.value as "FULL_PAYMENT" | "INSTALLMENT";
+                                setFeeRulesState((prev) => {
+                                  if (!prev) return null;
+                                  // Auto-adjust installments if type is switched
+                                  const sumPaid = (profileQuery.data?.payments || [])
+                                    .filter((p: any) => p.type === "tuition" && p.status === "paid")
+                                    .reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0);
+                                  
+                                  if (newType === "FULL_PAYMENT") {
+                                    return {
+                                      ...prev,
+                                      paymentType: newType,
+                                      numInstallments: 1,
+                                      installments: [
+                                        {
+                                          installmentNumber: 1,
+                                          amount: prev.totalCourseFee,
+                                          dueDate: prev.installments[0]?.dueDate || "",
+                                          status: sumPaid >= prev.totalCourseFee ? "paid" : "unpaid",
+                                        }
+                                      ]
+                                    };
+                                  } else {
+                                    return {
+                                      ...prev,
+                                      paymentType: newType,
+                                      numInstallments: Math.max(2, prev.numInstallments),
+                                    };
+                                  }
+                                });
+                              }}
+                            >
+                              <option value="FULL_PAYMENT">Full Payment</option>
+                              <option value="INSTALLMENT">Installment Payment</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-gray-600">Total Course Fee (₹)</label>
+                            <Input
+                              type="number"
+                              value={feeRulesState.totalCourseFee}
+                              onChange={(e) => setFeeRulesState(prev => prev ? { ...prev, totalCourseFee: Number(e.target.value) } : null)}
+                            />
+                          </div>
+
+                          {feeRulesState.paymentType === "INSTALLMENT" && (
+                            <>
+                              <div className="space-y-1">
+                                <label className="text-xs font-semibold text-gray-600">Initial Payment (₹)</label>
+                                <Input
+                                  type="number"
+                                  value={feeRulesState.initialPayment}
+                                  onChange={(e) => setFeeRulesState(prev => prev ? { ...prev, initialPayment: Number(e.target.value) } : null)}
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-xs font-semibold text-gray-600">No. of Installments</label>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  value={feeRulesState.numInstallments}
+                                  onChange={(e) => setFeeRulesState(prev => prev ? { ...prev, numInstallments: Math.max(1, Number(e.target.value)) } : null)}
+                                />
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Calculation summary info */}
+                        <div className="bg-slate-100/50 p-3 rounded-lg flex flex-wrap gap-6 text-xs font-medium text-slate-700">
+                          <div>
+                            Total Course Fee: <span className="font-bold text-slate-900">₹{feeRulesState.totalCourseFee.toLocaleString("en-IN")}</span>
+                          </div>
+                          <div>
+                            Already Paid: <span className="font-bold text-emerald-600">₹{
+                              (profileQuery.data?.payments || [])
+                                .filter((p: any) => p.type === "tuition" && p.status === "paid")
+                                .reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)
+                                .toLocaleString("en-IN")
+                            }</span>
+                          </div>
+                          <div>
+                            Outstanding Balance: <span className="font-bold text-red-600">₹{
+                              Math.max(0, feeRulesState.totalCourseFee - (
+                                (profileQuery.data?.payments || [])
+                                  .filter((p: any) => p.type === "tuition" && p.status === "paid")
+                                  .reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)
+                              )).toLocaleString("en-IN")
+                            }</span>
                           </div>
                         </div>
-                        <Button className="w-full bg-emerald-600 hover:bg-emerald-700 text-white mt-4 h-9 text-xs" onClick={() => {
-                          adjustFeesMutation.mutate({
-                            studentId: profileQuery.data.student.id,
-                            minInitialPayment: feeForm.minInitialPayment,
-                            paymentDueDate: feeForm.paymentDueDate ? new Date(feeForm.paymentDueDate) : undefined,
-                          });
-                        }}>
-                          Update Fee Schedule
-                        </Button>
+
+                        {/* Installment Schedule Section */}
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center">
+                            <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Installment Schedule</h5>
+                            <div className="flex gap-2">
+                              {feeRulesState.paymentType === "INSTALLMENT" && (
+                                <>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-[10px] bg-slate-100 hover:bg-slate-200 border-slate-200"
+                                    onClick={recalculateStudentFeeRules}
+                                  >
+                                    Recalculate
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-100"
+                                    onClick={addFeeRulesInstallmentRow}
+                                  >
+                                    Add Installment Row
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="border rounded-lg overflow-hidden bg-white">
+                            <Table className="text-xs">
+                              <TableHeader className="bg-slate-50">
+                                <TableRow>
+                                  <TableHead className="w-16">Inst #</TableHead>
+                                  <TableHead>Amount (₹)</TableHead>
+                                  <TableHead>Due Date</TableHead>
+                                  <TableHead className="w-24">Status</TableHead>
+                                  {feeRulesState.paymentType === "INSTALLMENT" && <TableHead className="w-16 text-right">Action</TableHead>}
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {feeRulesState.installments.map((inst, index) => {
+                                  const isPaid = inst.status === "paid";
+                                  return (
+                                    <TableRow key={index}>
+                                      <TableCell className="font-bold text-slate-600">
+                                        #{inst.installmentNumber}
+                                      </TableCell>
+                                      <TableCell>
+                                        <Input
+                                          type="number"
+                                          disabled={isPaid}
+                                          className="h-8 text-xs font-mono w-32 disabled:bg-slate-50"
+                                          value={inst.amount}
+                                          onChange={(e) => {
+                                            const newAmount = Number(e.target.value);
+                                            setFeeRulesState((prev) => {
+                                              if (!prev) return null;
+                                              const updated = [...prev.installments];
+                                              updated[index] = { ...updated[index], amount: newAmount };
+                                              return { ...prev, installments: updated };
+                                            });
+                                          }}
+                                        />
+                                      </TableCell>
+                                      <TableCell>
+                                        <Input
+                                          type="date"
+                                          disabled={isPaid}
+                                          className="h-8 text-xs font-mono w-40 disabled:bg-slate-50"
+                                          value={inst.dueDate}
+                                          onChange={(e) => {
+                                            const newDate = e.target.value;
+                                            setFeeRulesState((prev) => {
+                                              if (!prev) return null;
+                                              const updated = [...prev.installments];
+                                              updated[index] = { ...updated[index], dueDate: newDate };
+                                              return { ...prev, installments: updated };
+                                            });
+                                          }}
+                                        />
+                                      </TableCell>
+                                      <TableCell>
+                                        <Badge className={`font-bold text-[10px] capitalize ${
+                                          isPaid ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-100" : "bg-amber-100 text-amber-700 hover:bg-amber-100"
+                                        }`}>
+                                          {isPaid ? "paid" : "pending"}
+                                        </Badge>
+                                      </TableCell>
+                                      {feeRulesState.paymentType === "INSTALLMENT" && (
+                                        <TableCell className="text-right">
+                                          {!isPaid ? (
+                                            <Button
+                                              type="button"
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-7 w-7 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                              onClick={() => removeFeeRulesInstallmentRow(inst.installmentNumber)}
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                            </Button>
+                                          ) : "-"}
+                                        </TableCell>
+                                      )}
+                                    </TableRow>
+                                  );
+                                })}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        </div>
+
+                        {/* Save rules button */}
+                        <div className="flex justify-end gap-3 border-t pt-4">
+                          <Button
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white h-9 text-xs px-6"
+                            onClick={() => {
+                              // Perform validation checks before triggering dialog
+                              const sumPaid = (profileQuery.data?.payments || [])
+                                .filter((p: any) => p.type === "tuition" && p.status === "paid")
+                                .reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0);
+
+                              if (feeRulesState.totalCourseFee < sumPaid) {
+                                toast.error(`Total Course Fee (₹${feeRulesState.totalCourseFee}) cannot be less than the amount already paid (₹${sumPaid}).`);
+                                return;
+                              }
+
+                              const totalInstallmentsAmount = feeRulesState.installments.reduce((sum, inst) => sum + inst.amount, 0);
+                              if (Math.abs(totalInstallmentsAmount - feeRulesState.totalCourseFee) > 0.01) {
+                                toast.error(`Sum of all installments (₹${totalInstallmentsAmount.toLocaleString("en-IN")}) must equal the total course fee (₹${feeRulesState.totalCourseFee.toLocaleString("en-IN")}).`);
+                                return;
+                              }
+
+                              const unpaidWithDates = feeRulesState.installments.filter(inst => inst.status === "unpaid" && !inst.dueDate);
+                              if (feeRulesState.paymentType === "INSTALLMENT" && unpaidWithDates.length > 0) {
+                                toast.error("Please specify a valid due date for all unpaid installments.");
+                                return;
+                              }
+
+                              const dueDates = feeRulesState.installments
+                                .map(inst => inst.dueDate)
+                                .filter(d => !!d);
+                              if (new Set(dueDates).size !== dueDates.length) {
+                                toast.error("Installment due dates cannot overlap.");
+                                return;
+                              }
+
+                              // Verify chronological order for installments
+                              const sortedByNum = [...feeRulesState.installments].sort((a, b) => a.installmentNumber - b.installmentNumber);
+                              for (let i = 0; i < sortedByNum.length - 1; i++) {
+                                const currentD = sortedByNum[i].dueDate;
+                                const nextD = sortedByNum[i+1].dueDate;
+                                if (currentD && nextD && new Date(currentD).getTime() >= new Date(nextD).getTime()) {
+                                  toast.error(`Installment due dates must be chronological. Installment #${sortedByNum[i].installmentNumber} is due on or after Installment #${sortedByNum[i+1].installmentNumber}.`);
+                                  return;
+                                }
+                              }
+
+                              setIsConfirmingFeeRules(true);
+                            }}
+                          >
+                            Save Fee Rules
+                          </Button>
+                        </div>
                       </Card>
                     )}
                   </div>
@@ -2158,6 +2461,63 @@ export default function StudentsPage() {
           ) : null}
         </DialogContent>
       </Dialog>
+
+      {/* Configure Allocation Dialog */}
+      <Dialog open={isConfiguringAllocation} onOpenChange={setIsConfiguringAllocation}>
+        <DialogContent className="max-w-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-sm font-bold text-slate-800 uppercase tracking-wider">Configure Student Class Allocation</DialogTitle>
+            <DialogDescription className="text-xs">Adjust total allocated sessions, assign teachers, and select batches.</DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <ClassAllocationForm
+              value={tempAllocation}
+              onChange={setTempAllocation}
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="rounded-xl text-xs" onClick={() => setIsConfiguringAllocation(false)}>Cancel</Button>
+            <Button
+              className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold"
+              disabled={updateClassAllocationMutation.isPending}
+              onClick={() => {
+                updateClassAllocationMutation.mutate({
+                  studentId: detailsStudentId || 0,
+                  allocation: {
+                    oneToOne: {
+                      teacherId: tempAllocation.oneToOne.teacherId !== "" ? Number(tempAllocation.oneToOne.teacherId) : null,
+                      sessions30: Number(tempAllocation.oneToOne.sessions30),
+                      sessions45: Number(tempAllocation.oneToOne.sessions45),
+                      sessions60: Number(tempAllocation.oneToOne.sessions60),
+                    },
+                    group: {
+                      teacherId: tempAllocation.group.teacherId !== "" ? Number(tempAllocation.group.teacherId) : null,
+                      batchId: tempAllocation.group.batchId !== "" ? Number(tempAllocation.group.batchId) : null,
+                      sessions30: Number(tempAllocation.group.sessions30),
+                      sessions45: Number(tempAllocation.group.sessions45),
+                      sessions60: Number(tempAllocation.group.sessions60),
+                    }
+                  }
+                });
+              }}
+            >
+              {updateClassAllocationMutation.isPending ? "Saving..." : "Save Configuration"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Adjust Balance Dialog */}
+      {detailsStudentId && profileQuery.data?.classAllocation && (
+        <ClassBalanceAdjustment
+          open={isAdjustingBalance}
+          onClose={() => setIsAdjustingBalance(false)}
+          studentId={detailsStudentId}
+          type={adjustType}
+          currentAllocation={profileQuery.data.classAllocation}
+          onSuccess={() => profileQuery.refetch()}
+        />
+      )}
     </div>
   );
 }

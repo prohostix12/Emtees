@@ -124,6 +124,11 @@ export default function ReportsPage() {
             <tr>
               <th>Course Name</th>
               <th>Batch Name</th>
+              <th>Total Course Fee</th>
+              <th>Amount Paid</th>
+              <th>Outstanding Balance</th>
+              <th>Payment Option</th>
+              <th>Payment Status</th>
               <th>Start Date</th>
               <th>Duration</th>
               <th>Primary Teacher</th>
@@ -136,6 +141,11 @@ export default function ReportsPage() {
               <tr>
                 <td>${e.moduleName}</td>
                 <td>${e.batchName}</td>
+                <td>₹${parseFloat(data.profile?.totalCourseFee || data.profile?.feesTotal || "0").toLocaleString("en-IN")}</td>
+                <td>₹${parseFloat(data.profile?.feesPaid || "0").toLocaleString("en-IN")}</td>
+                <td>₹${parseFloat(data.profile?.remainingBalance || data.profile?.feesBalance || "0").toLocaleString("en-IN")}</td>
+                <td style="text-transform: capitalize;">${data.profile?.paymentOption?.replace('_', ' ') || "Full Payment"}</td>
+                <td style="text-transform: capitalize;">${data.profile?.paymentStatus || "Unpaid"}</td>
                 <td>${e.batchStartDate ? new Date(e.batchStartDate).toLocaleDateString() : "-"}</td>
                 <td>${e.batchDuration || "-"}</td>
                 <td>${e.primaryTeacherName}</td>
@@ -923,6 +933,13 @@ export default function ReportsPage() {
                                       <div><span className="font-medium text-gray-400">Start Date:</span> {e.batchStartDate ? new Date(e.batchStartDate).toLocaleDateString("en-IN") : "-"}</div>
                                       <div><span className="font-medium text-gray-400">Duration:</span> {e.batchDuration || "-"}</div>
                                       <div className="col-span-2"><span className="font-medium text-gray-400">Enrolled On:</span> {new Date(e.joinedAt).toLocaleDateString("en-IN")}</div>
+                                      <div className="col-span-2 border-t border-dashed border-gray-100 pt-2 mt-1 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                                        <div><span className="font-medium text-gray-400">Total Course Fee:</span> ₹{parseFloat(studentReport.data.profile?.totalCourseFee || studentReport.data.profile?.feesTotal || "0").toLocaleString("en-IN")}</div>
+                                        <div><span className="font-medium text-gray-400">Amount Paid:</span> ₹{parseFloat(studentReport.data.profile?.feesPaid || "0").toLocaleString("en-IN")}</div>
+                                        <div><span className="font-medium text-gray-400">Outstanding Balance:</span> ₹{parseFloat(studentReport.data.profile?.remainingBalance || studentReport.data.profile?.feesBalance || "0").toLocaleString("en-IN")}</div>
+                                        <div><span className="font-medium text-gray-400">Payment Option:</span> <span className="capitalize">{studentReport.data.profile?.paymentOption?.replace('_', ' ') || "Full Payment"}</span></div>
+                                        <div className="col-span-2"><span className="font-medium text-gray-400">Payment Status:</span> <span className="capitalize font-semibold text-emerald-700">{studentReport.data.profile?.paymentStatus || "Unpaid"}</span></div>
+                                      </div>
                                       {e.assignedTeachersNames.length > 0 && (
                                         <div className="col-span-2 text-[11px] bg-slate-50 dark:bg-slate-900 p-1.5 rounded mt-1">
                                           <span className="font-medium text-gray-400">Other Teachers:</span>{" "}
@@ -1408,7 +1425,6 @@ export default function ReportsPage() {
                           setShowTeacherDropdown(true);
                         }}
                         onFocus={() => setShowTeacherDropdown(true)}
-                        onBlur={() => setTimeout(() => setShowTeacherDropdown(false), 200)}
                         className="pl-10 pr-10"
                       />
                       {teacherSearch && (
@@ -1514,7 +1530,6 @@ export default function ReportsPage() {
 
                   {teacherReport.data && (
                     <div id="printable-teacher-report-area" className="space-y-6">
-                      {/* Page Header (Only visible in Print) */}
                       <div className="hidden print:block border-b pb-4 mb-6">
                         <h1 className="text-2xl font-bold text-sky-800">EMTEES Academy</h1>
                         <p className="text-sm text-gray-500 font-medium">Teacher Comprehensive Activity, Attendance & Salary Report</p>
@@ -1522,7 +1537,7 @@ export default function ReportsPage() {
                       </div>
 
                       {/* Header Summary Cards */}
-                      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 print-grid">
+                      <div className={`grid grid-cols-2 ${user?.role === "academic_head" ? "lg:grid-cols-3" : "lg:grid-cols-4"} gap-4 print-grid`}>
                         <Card className="print-card-border shadow-sm border border-slate-100">
                           <CardContent className="p-4 flex items-center gap-3">
                             <div className="w-10 h-10 rounded-full bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
@@ -1576,19 +1591,21 @@ export default function ReportsPage() {
                           </CardContent>
                         </Card>
 
-                        <Card className="print-card-border shadow-sm border border-slate-100">
-                          <CardContent className="p-4 flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center shrink-0">
-                              <DollarSign className="w-5 h-5" />
-                            </div>
-                            <div>
-                              <p className="text-xs text-gray-400 font-medium">Current Month Net</p>
-                              <p className="text-base font-bold text-emerald-650 mt-0.5">
-                                ₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.netSalary.toLocaleString("en-IN")}
-                              </p>
-                            </div>
-                          </CardContent>
-                        </Card>
+                        {user?.role !== "academic_head" && (
+                          <Card className="print-card-border shadow-sm border border-slate-100">
+                            <CardContent className="p-4 flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center shrink-0">
+                                <DollarSign className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-400 font-medium">Current Month Net</p>
+                                <p className="text-base font-bold text-emerald-650 mt-0.5">
+                                  ₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.netSalary.toLocaleString("en-IN")}
+                                </p>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        )}
                       </div>
 
                       {/* 1. Teacher Personal Information */}
@@ -1894,169 +1911,171 @@ export default function ReportsPage() {
                       </div>
 
                       {/* 4. Detailed Salary Report & configurations */}
-                      <Card className="print-card-border shadow-sm border border-slate-100">
-                        <CardHeader className="bg-slate-50/50 border-b border-slate-100 p-4">
-                          <CardTitle className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                            <DollarSign className="w-4 h-4 text-emerald-500" />
-                            Detailed Salary Breakdown (Current Billing Month)
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-5 space-y-6">
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            {/* Configurations Section */}
-                            <div className="space-y-4">
-                              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Salary configurations</h4>
-                              <div className="text-sm space-y-2 border border-slate-100 rounded-lg p-4 bg-slate-50/30">
-                                <div className="flex justify-between">
-                                  <span className="text-gray-500 font-medium">Basic Salary:</span>
-                                  <span className="font-bold text-gray-800">₹{parseFloat(String(teacherReport.data.salaryReport.config.basicSalary)).toLocaleString()}</span>
-                                </div>
-                                <div className="border-t border-dashed my-2 pt-2">
-                                  <span className="text-xs font-bold text-gray-400 block mb-1">One-to-One Session Rates:</span>
-                                  <div className="grid grid-cols-3 text-center text-xs gap-1.5 mt-1">
-                                    <div className="bg-slate-100 rounded p-1 font-medium">30m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne30MinRate}</strong></div>
-                                    <div className="bg-slate-100 rounded p-1 font-medium">45m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne45MinRate}</strong></div>
-                                    <div className="bg-slate-100 rounded p-1 font-medium">60m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne60MinRate}</strong></div>
+                      {user?.role !== "academic_head" && (
+                        <Card className="print-card-border shadow-sm border border-slate-100">
+                          <CardHeader className="bg-slate-50/50 border-b border-slate-100 p-4">
+                            <CardTitle className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                              <DollarSign className="w-4 h-4 text-emerald-500" />
+                              Detailed Salary Breakdown (Current Billing Month)
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="p-5 space-y-6">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                              {/* Configurations Section */}
+                              <div className="space-y-4">
+                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Salary configurations</h4>
+                                <div className="text-sm space-y-2 border border-slate-100 rounded-lg p-4 bg-slate-50/30">
+                                  <div className="flex justify-between">
+                                    <span className="text-gray-500 font-medium">Basic Salary:</span>
+                                    <span className="font-bold text-gray-800">₹{parseFloat(String(teacherReport.data.salaryReport.config.basicSalary)).toLocaleString()}</span>
+                                  </div>
+                                  <div className="border-t border-dashed my-2 pt-2">
+                                    <span className="text-xs font-bold text-gray-400 block mb-1">One-to-One Session Rates:</span>
+                                    <div className="grid grid-cols-3 text-center text-xs gap-1.5 mt-1">
+                                      <div className="bg-slate-100 rounded p-1 font-medium">30m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne30MinRate}</strong></div>
+                                      <div className="bg-slate-100 rounded p-1 font-medium">45m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne45MinRate}</strong></div>
+                                      <div className="bg-slate-100 rounded p-1 font-medium">60m: <strong>₹{teacherReport.data.salaryReport.config.oneToOne60MinRate}</strong></div>
+                                    </div>
+                                  </div>
+                                  <div className="border-t border-dashed my-2 pt-2">
+                                    <span className="text-xs font-bold text-gray-400 block mb-1">Group Session Rates:</span>
+                                    <div className="grid grid-cols-3 text-center text-xs gap-1.5 mt-1">
+                                      <div className="bg-slate-100 rounded p-1 font-medium">30m: <strong>₹{teacherReport.data.salaryReport.config.group30MinRate}</strong></div>
+                                      <div className="bg-slate-100 rounded p-1 font-medium">45m: <strong>₹{teacherReport.data.salaryReport.config.group45MinRate}</strong></div>
+                                      <div className="bg-slate-100 rounded p-1 font-medium">60m: <strong>₹{teacherReport.data.salaryReport.config.group60MinRate}</strong></div>
+                                    </div>
+                                  </div>
+                                  <div className="flex justify-between border-t border-dashed my-2 pt-2 text-xs">
+                                    <span className="text-emerald-600 font-bold">Configured Bonus:</span>
+                                    <span className="font-bold text-emerald-700">+₹{teacherReport.data.salaryReport.config.bonusAmount}</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs">
+                                    <span className="text-rose-600 font-bold">Configured Deduction:</span>
+                                    <span className="font-bold text-rose-700">-₹{teacherReport.data.salaryReport.config.deductionAmount}</span>
                                   </div>
                                 </div>
-                                <div className="border-t border-dashed my-2 pt-2">
-                                  <span className="text-xs font-bold text-gray-400 block mb-1">Group Session Rates:</span>
-                                  <div className="grid grid-cols-3 text-center text-xs gap-1.5 mt-1">
-                                    <div className="bg-slate-100 rounded p-1 font-medium">30m: <strong>₹{teacherReport.data.salaryReport.config.group30MinRate}</strong></div>
-                                    <div className="bg-slate-100 rounded p-1 font-medium">45m: <strong>₹{teacherReport.data.salaryReport.config.group45MinRate}</strong></div>
-                                    <div className="bg-slate-100 rounded p-1 font-medium">60m: <strong>₹{teacherReport.data.salaryReport.config.group60MinRate}</strong></div>
+                              </div>
+
+                              {/* Monthly Earnings breakdown */}
+                              <div className="space-y-4">
+                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Session Earnings Breakdown</h4>
+                                <div className="text-sm space-y-2 border border-slate-100 rounded-lg p-4">
+                                  <div className="flex justify-between text-xs font-bold text-gray-400 pb-1 border-b">
+                                    <span>Session Type & duration</span>
+                                    <span>Count & amount</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium">
+                                    <span>1:1 - 30 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min30.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min30.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium">
+                                    <span>1:1 - 45 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min45.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min45.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium">
+                                    <span>1:1 - 60 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min60.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min60.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium border-t border-dashed pt-1.5">
+                                    <span>Group - 30 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min30.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min30.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium">
+                                    <span>Group - 45 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min45.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min45.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between text-xs font-medium border-b border-dashed pb-1.5">
+                                    <span>Group - 60 Min:</span>
+                                    <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min60.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min60.earnings}`})</span>
+                                  </div>
+                                  <div className="flex justify-between font-bold text-xs pt-1.5">
+                                    <span>Total Session Earnings:</span>
+                                    <span className="text-indigo-650">₹{(teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.totalEarnings + teacherReport.data.salaryReport.currentMonthBreakdown.group.totalEarnings).toLocaleString()}</span>
                                   </div>
                                 </div>
-                                <div className="flex justify-between border-t border-dashed my-2 pt-2 text-xs">
-                                  <span className="text-emerald-600 font-bold">Configured Bonus:</span>
-                                  <span className="font-bold text-emerald-700">+₹{teacherReport.data.salaryReport.config.bonusAmount}</span>
-                                </div>
-                                <div className="flex justify-between text-xs">
-                                  <span className="text-rose-600 font-bold">Configured Deduction:</span>
-                                  <span className="font-bold text-rose-700">-₹{teacherReport.data.salaryReport.config.deductionAmount}</span>
+                              </div>
+
+                              {/* Net Salary Summary */}
+                              <div className="space-y-4">
+                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Net Salary Calculation</h4>
+                                <div className="text-sm space-y-2.5 border-2 border-slate-100 rounded-lg p-4 bg-slate-50/10 flex flex-col justify-between h-[calc(100%-32px)]">
+                                  <div className="space-y-1.5">
+                                    <div className="flex justify-between font-medium">
+                                      <span className="text-gray-500">Basic Salary:</span>
+                                      <span className="font-semibold text-gray-800">₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.basicSalary.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between font-medium">
+                                      <span className="text-gray-500">Session Earnings:</span>
+                                      <span className="font-semibold text-gray-800">₹{(teacherReport.data.salaryReport.currentMonthBreakdown.summary.oneToOneEarnings + teacherReport.data.salaryReport.currentMonthBreakdown.summary.groupEarnings).toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between font-medium">
+                                      <span className="text-gray-500">Performance Incentive:</span>
+                                      <span className="font-semibold text-emerald-650">+₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.incentives.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between font-medium">
+                                      <span className="text-gray-500">Configured Bonus:</span>
+                                      <span className="font-semibold text-emerald-650">+₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.bonus.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between font-medium">
+                                      <span className="text-gray-500">Deductions:</span>
+                                      <span className="font-semibold text-rose-600">-₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.deductions.toLocaleString()}</span>
+                                    </div>
+                                  </div>
+                                  <div className="flex justify-between border-t pt-2.5 mt-2 bg-slate-100/40 p-2 rounded">
+                                    <span className="font-bold text-slate-700">Net Salary:</span>
+                                    <span className="font-extrabold text-lg text-emerald-700">
+                                      ₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.netSalary.toLocaleString("en-IN")}
+                                    </span>
+                                  </div>
                                 </div>
                               </div>
                             </div>
 
-                            {/* Monthly Earnings breakdown */}
-                            <div className="space-y-4">
-                              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Session Earnings Breakdown</h4>
-                              <div className="text-sm space-y-2 border border-slate-100 rounded-lg p-4">
-                                <div className="flex justify-between text-xs font-bold text-gray-400 pb-1 border-b">
-                                  <span>Session Type & duration</span>
-                                  <span>Count & amount</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium">
-                                  <span>1:1 - 30 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min30.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min30.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium">
-                                  <span>1:1 - 45 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min45.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min45.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium">
-                                  <span>1:1 - 60 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min60.count} sessions ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.min60.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium border-t border-dashed pt-1.5">
-                                  <span>Group - 30 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min30.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min30.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium">
-                                  <span>Group - 45 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min45.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min45.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-medium border-b border-dashed pb-1.5">
-                                  <span>Group - 60 Min:</span>
-                                  <span>{teacherReport.data.salaryReport.currentMonthBreakdown.group.min60.count} classes ({`₹${teacherReport.data.salaryReport.currentMonthBreakdown.group.min60.earnings}`})</span>
-                                </div>
-                                <div className="flex justify-between font-bold text-xs pt-1.5">
-                                  <span>Total Session Earnings:</span>
-                                  <span className="text-indigo-650">₹{(teacherReport.data.salaryReport.currentMonthBreakdown.oneToOne.totalEarnings + teacherReport.data.salaryReport.currentMonthBreakdown.group.totalEarnings).toLocaleString()}</span>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Net Salary Summary */}
-                            <div className="space-y-4">
-                              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Net Salary Calculation</h4>
-                              <div className="text-sm space-y-2.5 border-2 border-slate-100 rounded-lg p-4 bg-slate-50/10 flex flex-col justify-between h-[calc(100%-32px)]">
-                                <div className="space-y-1.5">
-                                  <div className="flex justify-between font-medium">
-                                    <span className="text-gray-500">Basic Salary:</span>
-                                    <span className="font-semibold text-gray-800">₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.basicSalary.toLocaleString()}</span>
-                                  </div>
-                                  <div className="flex justify-between font-medium">
-                                    <span className="text-gray-500">Session Earnings:</span>
-                                    <span className="font-semibold text-gray-800">₹{(teacherReport.data.salaryReport.currentMonthBreakdown.summary.oneToOneEarnings + teacherReport.data.salaryReport.currentMonthBreakdown.summary.groupEarnings).toLocaleString()}</span>
-                                  </div>
-                                  <div className="flex justify-between font-medium">
-                                    <span className="text-gray-500">Performance Incentive:</span>
-                                    <span className="font-semibold text-emerald-650">+₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.incentives.toLocaleString()}</span>
-                                  </div>
-                                  <div className="flex justify-between font-medium">
-                                    <span className="text-gray-500">Configured Bonus:</span>
-                                    <span className="font-semibold text-emerald-650">+₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.bonus.toLocaleString()}</span>
-                                  </div>
-                                  <div className="flex justify-between font-medium">
-                                    <span className="text-gray-500">Deductions:</span>
-                                    <span className="font-semibold text-rose-600">-₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.deductions.toLocaleString()}</span>
-                                  </div>
-                                </div>
-                                <div className="flex justify-between border-t pt-2.5 mt-2 bg-slate-100/40 p-2 rounded">
-                                  <span className="font-bold text-slate-700">Net Salary:</span>
-                                  <span className="font-extrabold text-lg text-emerald-700">
-                                    ₹{teacherReport.data.salaryReport.currentMonthBreakdown.summary.netSalary.toLocaleString("en-IN")}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Salary History Table */}
-                          <div className="space-y-3 pt-3 border-t">
-                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Salary Payment History</h4>
-                            {teacherReport.data.salaryReport.history.length === 0 ? (
-                              <div className="text-center py-4 text-xs text-gray-400">No salary payment records found.</div>
-                            ) : (
-                              <div className="overflow-x-auto rounded-lg border border-slate-100">
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow className="bg-slate-50/50">
-                                      <TableHead>Billing Month</TableHead>
-                                      <TableHead>Classes Conducted</TableHead>
-                                      <TableHead>Net Salary / Amount Paid</TableHead>
-                                      <TableHead>Payment Status</TableHead>
-                                      <TableHead>Disbursal Date</TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {teacherReport.data.salaryReport.history.map((hist) => (
-                                      <TableRow key={hist.id}>
-                                        <TableCell className="font-semibold">{hist.month}</TableCell>
-                                        <TableCell className="font-medium text-gray-655">{hist.classesConducted} classes</TableCell>
-                                        <TableCell className="font-semibold text-slate-750">₹{hist.salaryEarned.toLocaleString()}</TableCell>
-                                        <TableCell>
-                                          <Badge className={`capitalize text-[10px] ${
-                                            hist.paymentStatus === "paid" ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-100" :
-                                            hist.paymentStatus === "unpaid" ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
-                                            "bg-gray-100 text-gray-700 hover:bg-gray-100"
-                                          }`}>
-                                            {hist.paymentStatus}
-                                          </Badge>
-                                        </TableCell>
-                                        <TableCell className="text-xs text-gray-500 font-medium">
-                                          {hist.paymentDate ? new Date(hist.paymentDate).toLocaleDateString() : "-"}
-                                        </TableCell>
+                            {/* Salary History Table */}
+                            <div className="space-y-3 pt-3 border-t">
+                              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Salary Payment History</h4>
+                              {teacherReport.data.salaryReport.history.length === 0 ? (
+                                <div className="text-center py-4 text-xs text-gray-400">No salary payment records found.</div>
+                              ) : (
+                                <div className="overflow-x-auto rounded-lg border border-slate-100">
+                                  <Table>
+                                    <TableHeader>
+                                      <TableRow className="bg-slate-50/50">
+                                        <TableHead>Billing Month</TableHead>
+                                        <TableHead>Classes Conducted</TableHead>
+                                        <TableHead>Net Salary / Amount Paid</TableHead>
+                                        <TableHead>Payment Status</TableHead>
+                                        <TableHead>Disbursal Date</TableHead>
                                       </TableRow>
-                                    ))}
-                                  </TableBody>
-                                </Table>
-                              </div>
-                            )}
-                          </div>
-                        </CardContent>
-                      </Card>
+                                    </TableHeader>
+                                    <TableBody>
+                                      {teacherReport.data.salaryReport.history.map((hist) => (
+                                        <TableRow key={hist.id}>
+                                          <TableCell className="font-semibold">{hist.month}</TableCell>
+                                          <TableCell className="font-medium text-gray-655">{hist.classesConducted} classes</TableCell>
+                                          <TableCell className="font-semibold text-slate-750">₹{hist.salaryEarned.toLocaleString()}</TableCell>
+                                          <TableCell>
+                                            <Badge className={`capitalize text-[10px] ${
+                                              hist.paymentStatus === "paid" ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-100" :
+                                              hist.paymentStatus === "unpaid" ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
+                                              "bg-gray-100 text-gray-700 hover:bg-gray-100"
+                                            }`}>
+                                              {hist.paymentStatus}
+                                            </Badge>
+                                          </TableCell>
+                                          <TableCell className="text-xs text-gray-500 font-medium">
+                                            {hist.paymentDate ? new Date(hist.paymentDate).toLocaleDateString() : "-"}
+                                          </TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                </div>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )}
 
                       {/* 5. Performance Summary Dashboard */}
                       <Card className="print-card-border shadow-sm border border-slate-100">
@@ -2154,11 +2173,13 @@ export default function ReportsPage() {
 
                       {/* Admin Actions Footer */}
                       <div className="flex flex-wrap justify-end gap-3 pt-4 border-t border-dashed border-gray-200 print-hide">
-                        <Link href={`/salaries?search=${encodeURIComponent(teacherReport.data.teacher.name)}`}>
-                          <Button variant="outline" size="sm" className="flex items-center gap-1.5">
-                            <DollarSign className="w-3.5 h-3.5" /> View Salary Logs
-                          </Button>
-                        </Link>
+                        {user?.role !== "academic_head" && (
+                          <Link href={`/salaries?search=${encodeURIComponent(teacherReport.data.teacher.name)}`}>
+                            <Button variant="outline" size="sm" className="flex items-center gap-1.5">
+                              <DollarSign className="w-3.5 h-3.5" /> View Salary Logs
+                            </Button>
+                          </Link>
+                        )}
                         <Link href={`/classes?teacher=${teacherReport.data.teacher.id}`}>
                           <Button variant="outline" size="sm" className="flex items-center gap-1.5">
                             <Calendar className="w-3.5 h-3.5" /> View Class Logs

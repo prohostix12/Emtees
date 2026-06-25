@@ -12,6 +12,7 @@ import { communityRouter } from "./routers/community";
 import { disciplineRouter } from "./routers/discipline";
 import { salesExecutiveRouter } from "./routers/salesExecutive";
 
+
 export const appRouter = createRouter({
   ping: publicQuery.query(() => ({ ok: true, ts: Date.now() })),
   auth: authRouter,
