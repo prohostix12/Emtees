@@ -104,6 +104,9 @@ export default function FeesPage() {
   const [adjustForm, setAdjustForm] = useState({
     studentId: 0,
     feesTotal: 0,
+    discount: 0,
+    discountType: "flat" as "flat" | "percentage",
+    paymentMode: "FULL_PAYMENT" as "FULL_PAYMENT" | "INSTALLMENT",
     feesPaid: 0,
     minInitialPayment: 0,
     paymentDueDate: "",
@@ -135,10 +138,13 @@ export default function FeesPage() {
   const isAmountValid = payAmount >= (minRequiredAmount || 1) && payAmount <= balance;
 
   // Actions
-  const handleOpenAdjust = (studentId: number, profile?: any) => {
+  const handleOpenAdjust = (studentId: number, profile?: any, feeConfig?: any) => {
     setAdjustForm({
       studentId,
-      feesTotal: profile ? parseFloat(profile.feesTotal || "0") : 0,
+      feesTotal: feeConfig ? parseFloat(feeConfig.totalCourseFee || "0") : (profile ? parseFloat(profile.totalCourseFee || profile.feesTotal || "0") : 0),
+      discount: feeConfig ? parseFloat(feeConfig.discount || "0") : 0,
+      discountType: feeConfig?.discountType || "flat",
+      paymentMode: feeConfig?.paymentMode || (profile?.paymentOption?.toUpperCase() === "INSTALLMENT" ? "INSTALLMENT" : "FULL_PAYMENT"),
       feesPaid: profile ? parseFloat(profile.feesPaid || "0") : 0,
       minInitialPayment: profile ? parseFloat(profile.minInitialPayment || "0") : 0,
       paymentDueDate: profile?.paymentDueDate ? new Date(profile.paymentDueDate).toISOString().split("T")[0] : "",
@@ -602,7 +608,7 @@ export default function FeesPage() {
                                   <CreditCard className="w-3 h-3 mr-1" /> Record
                                 </Button>
                               )}
-                              <Button size="sm" variant="outline" className="h-7 text-[10px] flex items-center" onClick={() => handleOpenAdjust(p.studentId)}>
+                              <Button size="sm" variant="outline" className="h-7 text-[10px] flex items-center" onClick={() => handleOpenAdjust(p.studentId, p.student?.profile, (p.student as any)?.feeConfig)}>
                                 <Sliders className="w-3 h-3 mr-1" /> Adjust
                               </Button>
                             </TableCell>
@@ -726,7 +732,7 @@ export default function FeesPage() {
       <Dialog open={adjustOpen} onOpenChange={setAdjustOpen}>
         <DialogContent className="max-w-md bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-gray-800">
           <DialogHeader>
-            <DialogTitle className="text-base font-bold text-gray-800 dark:text-gray-200">Adjust Student Fees & Settings</DialogTitle>
+            <DialogTitle className="text-base font-bold text-gray-800 dark:text-gray-200">Student Fee Configuration</DialogTitle>
           </DialogHeader>
           <form
             onSubmit={(e) => {
@@ -734,6 +740,9 @@ export default function FeesPage() {
               adjustStudentFees.mutate({
                 studentId: Number(adjustForm.studentId),
                 feesTotal: Number(adjustForm.feesTotal),
+                discount: Number(adjustForm.discount),
+                discountType: adjustForm.discountType,
+                paymentMode: adjustForm.paymentMode,
                 feesPaid: Number(adjustForm.feesPaid),
                 minInitialPayment: Number(adjustForm.minInitialPayment),
                 paymentDueDate: adjustForm.paymentDueDate ? new Date(adjustForm.paymentDueDate) : undefined,
@@ -747,14 +756,51 @@ export default function FeesPage() {
               <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Student User ID *</label>
               <Input type="number" required placeholder="User ID" value={adjustForm.studentId || ""} onChange={(e) => setAdjustForm({ ...adjustForm, studentId: Number(e.target.value) })} />
             </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Total Course Fee (₹)</label>
-              <Input type="number" placeholder="Total Fees" value={adjustForm.feesTotal || 0} onChange={(e) => setAdjustForm({ ...adjustForm, feesTotal: Number(e.target.value) })} />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Total Course Fee (₹)</label>
+                <Input type="number" placeholder="Total Fees" value={adjustForm.feesTotal || 0} onChange={(e) => setAdjustForm({ ...adjustForm, feesTotal: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Payment Mode</label>
+                <select
+                  className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-950 px-3 py-1 text-sm outline-none"
+                  value={adjustForm.paymentMode}
+                  onChange={(e) => setAdjustForm({ ...adjustForm, paymentMode: e.target.value as any })}
+                >
+                  <option value="FULL_PAYMENT">Full Payment</option>
+                  <option value="INSTALLMENT">Installment</option>
+                </select>
+              </div>
             </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Fees Paid (₹)</label>
-              <Input type="number" placeholder="Fees Paid" value={adjustForm.feesPaid || 0} onChange={(e) => setAdjustForm({ ...adjustForm, feesPaid: Number(e.target.value) })} />
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Discount</label>
+                <Input type="number" placeholder="0" value={adjustForm.discount || 0} onChange={(e) => setAdjustForm({ ...adjustForm, discount: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Discount Type</label>
+                <select
+                  className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-950 px-3 py-1 text-sm outline-none"
+                  value={adjustForm.discountType}
+                  onChange={(e) => setAdjustForm({ ...adjustForm, discountType: e.target.value as any })}
+                >
+                  <option value="flat">Flat Amount (₹)</option>
+                  <option value="percentage">Percentage (%)</option>
+                </select>
+              </div>
             </div>
+
+            <div className="p-2 rounded bg-indigo-50 dark:bg-indigo-950/40 text-xs flex justify-between font-medium">
+              <span>Calculated Final Fee:</span>
+              <span className="font-bold text-indigo-700 dark:text-indigo-300">
+                ₹{adjustForm.discountType === "percentage" 
+                  ? Math.max(0, adjustForm.feesTotal - (adjustForm.feesTotal * adjustForm.discount / 100))
+                  : Math.max(0, adjustForm.feesTotal - adjustForm.discount)}
+              </span>
+            </div>
+
             <div>
               <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Minimum Initial Payment (₹)</label>
               <Input type="number" placeholder="Minimum Initial Payment" value={adjustForm.minInitialPayment || 0} onChange={(e) => setAdjustForm({ ...adjustForm, minInitialPayment: Number(e.target.value) })} />
@@ -768,7 +814,7 @@ export default function FeesPage() {
               <Input type="number" placeholder="7" value={adjustForm.gracePeriodDays || 0} onChange={(e) => setAdjustForm({ ...adjustForm, gracePeriodDays: Number(e.target.value) })} />
             </div>
             <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold pt-2" disabled={adjustStudentFees.isPending}>
-              {adjustStudentFees.isPending ? "Updating..." : "Save Settings & Adjust"}
+              {adjustStudentFees.isPending ? "Updating..." : "Save Student Fee Configuration"}
             </Button>
           </form>
         </DialogContent>

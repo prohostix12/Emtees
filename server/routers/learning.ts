@@ -1,13 +1,13 @@
 import { z } from "zod";
-import { eq, desc, and, count, sql, inArray, or, ilike } from "drizzle-orm";
+import { eq, desc, asc, and, count, sql, inArray, or, ilike } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments, learningNotes, learningVideos, assignments, assignmentSubmissions, classBatches } from "@db/schema";
+import { modules, batches, batchEnrollments, messages, learningMaterials, profiles, users, flexibilityRequests, classes, oneToOneSessions, feedback, batchFeeAuditLogs, batchAuditLogs, payments, learningNotes, learningVideos, assignments, assignmentSubmissions, classBatches, studentFeeConfigurations } from "@db/schema";
 import { sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getIo } from "../lib/socketInstance";
-import { isStudentFeeRestricted } from "../lib/feeHelper";
+import { isStudentFeeRestricted, recalculateStudentFees } from "../lib/feeHelper";
 
 function parseTimeSlot(timeSlot: string) {
   const cleanStr = timeSlot.trim().toUpperCase();
@@ -124,39 +124,111 @@ export const learningRouter = createRouter({
       });
     }),
 
+  getMatchingWaitingStudents: adminQuery
+    .input(z.object({
+      moduleId: z.number(),
+      timeSlot: z.string(),
+      sessionType: z.enum(["group", "both"]).default("group"),
+    }))
+    .query(async ({ input }) => {
+      const db = getDb();
+      const unassignedStudents = await db
+        .select({
+          id: users.id,
+          name: users.name,
+          email: users.email,
+          phone: users.phone,
+          unionId: users.unionId,
+          moduleId: profiles.moduleId,
+          preferredClassTime: profiles.preferredClassTime,
+          sessionType: profiles.sessionType,
+          enrollmentStatus: profiles.enrollmentStatus,
+        })
+        .from(users)
+        .innerJoin(profiles, eq(users.id, profiles.userId))
+        .where(
+          and(
+            eq(users.role, "student"),
+            eq(users.status, "active")
+          )
+        );
+
+      const activeEnrollments = await db
+        .select({ studentId: batchEnrollments.studentId })
+        .from(batchEnrollments)
+        .where(eq(batchEnrollments.status, "active"));
+      const enrolledStudentIds = new Set(activeEnrollments.map(e => e.studentId));
+
+      const cleanTargetSlot = input.timeSlot.trim().toLowerCase();
+
+      return unassignedStudents.filter((student) => {
+        if (enrolledStudentIds.has(student.id)) return false;
+        if (student.sessionType === "one_on_one") return false;
+        if (student.moduleId && Number(student.moduleId) !== input.moduleId) return false;
+
+        const studentTime = (student.preferredClassTime || "").trim().toLowerCase();
+        if (studentTime && cleanTargetSlot && studentTime !== cleanTargetSlot && !cleanTargetSlot.includes(studentTime) && !studentTime.includes(cleanTargetSlot)) {
+          return false;
+        }
+
+        return true;
+      });
+    }),
+
   createBatch: adminQuery
     .input(z.object({
       moduleId: z.number(),
       name: z.string(),
       timeSlot: z.string().optional(),
+      sessionType: z.enum(["group", "both"]).default("group"),
       teacherId: z.number().optional(),
       maxStudents: z.number().optional(),
       startDate: z.date().optional(),
       duration: z.string().optional(),
       courseFee: z.number().optional(),
-      oneOnOne30Allocated: z.number().optional(),
-      oneOnOne45Allocated: z.number().optional(),
-      oneOnOne60Allocated: z.number().optional(),
-      group30Allocated: z.number().optional(),
-      group45Allocated: z.number().optional(),
-      group60Allocated: z.number().optional(),
+      studentIds: z.array(z.number()).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb();
-      const { courseFee, ...rest } = input;
+      const { courseFee, studentIds, sessionType, ...rest } = input;
       const result = await db.insert(batches).values({
         ...rest,
+        sessionType: sessionType || "group",
         courseFee: courseFee !== undefined ? String(courseFee) : undefined,
       }).returning({ id: batches.id });
 
       const batchId = result[0]?.id;
 
+      if (batchId && studentIds && studentIds.length > 0) {
+        for (const sId of studentIds) {
+          await db.insert(batchEnrollments).values({
+            batchId,
+            studentId: sId,
+            status: "active",
+            paymentType: "FULL_PAYMENT",
+            moduleId: input.moduleId,
+            oneOnOne30Allocated: 0,
+            oneOnOne45Allocated: 0,
+            oneOnOne60Allocated: 0,
+            group30Allocated: 0,
+            group45Allocated: 0,
+            group60Allocated: 0,
+            assignedTeachers: input.teacherId ? [input.teacherId] : [],
+          });
+          await db.update(profiles).set({
+            batch: input.name,
+            batchTime: input.timeSlot || "",
+            enrollmentStatus: "enrolled",
+          }).where(eq(profiles.userId, sId));
+        }
+      }
+
       if (batchId && input.teacherId) {
         // Prepare group classes to schedule
         const groupClassesToSchedule: { title: string; duration: number }[] = [];
-        const group30 = input.group30Allocated || 0;
-        const group45 = input.group45Allocated || 0;
-        const group60 = input.group60Allocated || 0;
+        const group30 = 0;
+        const group45 = 0;
+        const group60 = 0;
 
         for (let i = 1; i <= group30; i++) {
           groupClassesToSchedule.push({ title: `${input.name} - Group Session (30 Min) ${i}`, duration: 30 });
@@ -289,12 +361,6 @@ export const learningRouter = createRouter({
       moduleId: z.number().optional(),
       startDate: z.date().nullable().optional(),
       duration: z.string().nullable().optional(),
-      oneOnOne30Allocated: z.number().optional(),
-      oneOnOne45Allocated: z.number().optional(),
-      oneOnOne60Allocated: z.number().optional(),
-      group30Allocated: z.number().optional(),
-      group45Allocated: z.number().optional(),
-      group60Allocated: z.number().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       // Strict check: Only super_admin can edit batch details
@@ -400,12 +466,6 @@ export const learningRouter = createRouter({
             moduleId: data.moduleId,
             startDate: data.startDate,
             duration: data.duration,
-            oneOnOne30Allocated: data.oneOnOne30Allocated,
-            oneOnOne45Allocated: data.oneOnOne45Allocated,
-            oneOnOne60Allocated: data.oneOnOne60Allocated,
-            group30Allocated: data.group30Allocated,
-            group45Allocated: data.group45Allocated,
-            group60Allocated: data.group60Allocated,
           })
           .where(eq(batches.id, id));
 
@@ -424,6 +484,93 @@ export const learningRouter = createRouter({
           },
         },
       });
+    }),
+
+  getStudentFeeConfig: adminQuery
+    .input(z.object({
+      studentId: z.union([z.number(), z.string()]),
+    }))
+    .query(async ({ ctx, input }) => {
+      const db = getDb();
+      let userId: number | null = null;
+      if (typeof input.studentId === "string") {
+        const trimmed = input.studentId.trim();
+        const parsed = parseInt(trimmed, 10);
+        if (!isNaN(parsed) && String(parsed) === trimmed) {
+          userId = parsed;
+        } else {
+          const u = await db.query.users.findFirst({
+            where: and(eq(users.role, "student"), ilike(users.unionId, trimmed)),
+          });
+          if (u) userId = u.id;
+          else {
+            const p = await db.query.profiles.findFirst({
+              where: ilike(profiles.enrollmentId, trimmed),
+            });
+            if (p) userId = p.userId;
+          }
+        }
+      } else {
+        userId = input.studentId;
+      }
+
+      if (!userId) return null;
+
+      const studentUser = await db.query.users.findFirst({
+        where: eq(users.id, userId),
+        with: { profile: true },
+      });
+      if (!studentUser) return null;
+
+      let feeConfig = await db.query.studentFeeConfigurations.findFirst({
+        where: eq(studentFeeConfigurations.studentId, userId),
+      });
+
+      if (!feeConfig) {
+        const defaultTotal = parseFloat(studentUser.profile?.totalCourseFee || studentUser.profile?.feesTotal || "0");
+        const [inserted] = await db.insert(studentFeeConfigurations).values({
+          studentId: userId,
+          totalCourseFee: String(defaultTotal),
+          discount: "0.00",
+          discountType: "flat",
+          finalFee: String(defaultTotal),
+          paymentMode: studentUser.profile?.paymentOption?.toUpperCase() === "INSTALLMENT" ? "INSTALLMENT" : "FULL_PAYMENT",
+          downPayment: studentUser.profile?.downPayment || "0.00",
+          numberOfInstallments: 1,
+        }).returning();
+        feeConfig = inserted;
+      }
+
+      const allPayments = await db.query.payments.findMany({
+        where: eq(payments.studentId, userId),
+        orderBy: [asc(payments.installmentNumber), asc(payments.id)],
+      });
+
+      const paidPayments = allPayments.filter((p) => p.status === "paid" && p.type === "tuition");
+      const amountPaid = paidPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+      const finalFeeFloat = parseFloat(feeConfig.finalFee);
+      const remainingBalance = Math.max(0, finalFeeFloat - amountPaid);
+      const remainingInstallments = allPayments.filter((p) => p.status === "unpaid");
+
+      return {
+        studentId: userId,
+        studentName: studentUser.name,
+        unionId: studentUser.unionId,
+        feeConfig,
+        totalCourseFee: parseFloat(feeConfig.totalCourseFee),
+        discount: parseFloat(feeConfig.discount),
+        finalFee: finalFeeFloat,
+        amountPaid,
+        remainingBalance,
+        paymentMode: feeConfig.paymentMode,
+        remainingInstallments: remainingInstallments.map((inst) => ({
+          id: inst.id,
+          installmentNumber: inst.installmentNumber,
+          amount: parseFloat(inst.amount),
+          dueDate: inst.dueDate,
+          status: inst.status,
+        })),
+      };
     }),
 
   enrollStudent: adminQuery
@@ -492,9 +639,6 @@ export const learningRouter = createRouter({
         throw new TRPCError({ code: "CONFLICT", message: "Student already enrolled in this batch" });
       }
 
-      const paymentType = input.paymentType || "FULL_PAYMENT";
-
-      // Update student profile with enrolled batch and course info
       const batch = await db.query.batches.findFirst({
         where: eq(batches.id, input.batchId),
         with: { module: true },
@@ -504,17 +648,39 @@ export const learningRouter = createRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
       }
 
+      // Ensure student fee configuration exists
+      let feeConfig = await db.query.studentFeeConfigurations.findFirst({
+        where: eq(studentFeeConfigurations.studentId, userId),
+      });
+
+      if (!feeConfig) {
+        const defaultFee = batch.courseFee ? parseFloat(batch.courseFee) : 0;
+        const total = input.feesTotal !== undefined ? input.feesTotal : defaultFee;
+        const [inserted] = await db.insert(studentFeeConfigurations).values({
+          studentId: userId,
+          totalCourseFee: String(total),
+          discount: "0.00",
+          discountType: "flat",
+          finalFee: String(total),
+          paymentMode: (input.paymentType || "FULL_PAYMENT").toUpperCase(),
+          downPayment: String(total),
+          numberOfInstallments: input.installments?.length || 1,
+        }).returning();
+        feeConfig = inserted;
+      }
+
       await db.insert(batchEnrollments).values({
         batchId: input.batchId,
         studentId: userId,
-        paymentType,
+        paymentType: feeConfig.paymentMode,
         moduleId: batch.moduleId,
-        oneOnOne30Allocated: batch.oneOnOne30Allocated,
-        oneOnOne45Allocated: batch.oneOnOne45Allocated,
-        oneOnOne60Allocated: batch.oneOnOne60Allocated,
-        group30Allocated: batch.group30Allocated,
-        group45Allocated: batch.group45Allocated,
-        group60Allocated: batch.group60Allocated,
+        studentFeeConfigId: feeConfig.id,
+        oneOnOne30Allocated: 0,
+        oneOnOne45Allocated: 0,
+        oneOnOne60Allocated: 0,
+        group30Allocated: 0,
+        group45Allocated: 0,
+        group60Allocated: 0,
         oneOnOne30Used: 0,
         oneOnOne45Used: 0,
         oneOnOne60Used: 0,
@@ -524,81 +690,29 @@ export const learningRouter = createRouter({
         assignedTeachers: batch.teacherId ? [batch.teacherId] : [],
       });
 
-      if (batch) {
-        const defaultFee = batch.courseFee ? parseFloat(batch.courseFee) : 0;
-        const feesTotal = input.feesTotal !== undefined ? input.feesTotal : defaultFee;
+      // Update student profile with enrolled batch and course info (preserving fee config)
+      const existingProfile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, userId),
+      });
 
-        let paymentDueDate: Date | null = null;
-        if (paymentType === "INSTALLMENT" && input.installments && input.installments.length > 0) {
-          const firstInst = input.installments.find((i) => i.installmentNumber === 1);
-          if (firstInst?.dueDate) {
-            paymentDueDate = new Date(firstInst.dueDate);
-          }
-        }
-
-        const existingProfile = await db.query.profiles.findFirst({
-          where: eq(profiles.userId, userId),
-        });
-
-        if (existingProfile) {
-          await db.update(profiles)
-            .set({
-              batch: batch.name,
-              batchTime: batch.timeSlot,
-              course: batch.module?.name || null,
-              feesTotal: String(feesTotal),
-              feesBalance: String(feesTotal),
-              feesPaid: "0.00",
-              paymentStatus: "unpaid",
-              paymentDueDate: paymentDueDate,
-            })
-            .where(eq(profiles.userId, userId));
-        } else {
-          await db.insert(profiles).values({
-            userId,
+      if (existingProfile) {
+        await db.update(profiles)
+          .set({
             batch: batch.name,
             batchTime: batch.timeSlot,
             course: batch.module?.name || null,
-            feesTotal: String(feesTotal),
-            feesBalance: String(feesTotal),
-            feesPaid: "0.00",
-            paymentStatus: "unpaid",
-            paymentDueDate: paymentDueDate,
-          });
-        }
-
-        // Clean up any existing unpaid payments for this batch to avoid duplicates
-        await db.delete(payments).where(and(
-          eq(payments.studentId, userId),
-          eq(payments.batchId, input.batchId),
-          eq(payments.status, "unpaid")
-        ));
-
-        // Generate payments
-        if (paymentType === "INSTALLMENT" && input.installments && input.installments.length > 0) {
-          for (const inst of input.installments) {
-            await db.insert(payments).values({
-              studentId: userId,
-              amount: String(inst.amount),
-              type: "tuition",
-              status: "unpaid",
-              dueDate: inst.dueDate ? new Date(inst.dueDate) : null,
-              installmentNumber: inst.installmentNumber,
-              batchId: input.batchId,
-            });
-          }
-        } else {
-          await db.insert(payments).values({
-            studentId: userId,
-            amount: String(feesTotal),
-            type: "tuition",
-            status: "unpaid",
-            dueDate: null,
-            installmentNumber: null,
-            batchId: input.batchId,
-          });
-        }
+          })
+          .where(eq(profiles.userId, userId));
+      } else {
+        await db.insert(profiles).values({
+          userId,
+          batch: batch.name,
+          batchTime: batch.timeSlot,
+          course: batch.module?.name || null,
+        });
       }
+
+      await recalculateStudentFees(userId);
 
       // Capacity alert: notify admins if over maxStudents
       const [{ value: activeCount }] = await db

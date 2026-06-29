@@ -1,7 +1,7 @@
 import pg from "pg";
 import { env } from "../server/lib/env";
 
-async function applyMigrations() {
+export async function applyMigrations() {
   console.log("Applying manual migrations...");
   const isLocal = env.databaseUrl.includes("localhost") || env.databaseUrl.includes("127.0.0.1");
   const pool = new pg.Pool({
@@ -235,14 +235,90 @@ async function applyMigrations() {
       );
     `);
 
+    console.log("Adding session type and preferred timing columns to profiles...");
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "payment_type" varchar(50) DEFAULT 'full_payment';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "one_on_one_enabled" boolean DEFAULT false NOT NULL;`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "group_session_enabled" boolean DEFAULT false NOT NULL;`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "preferred_class_time" varchar(50);`);
+
+    console.log("Backfilling one_on_one_enabled and group_session_enabled for existing students...");
+    await client.query(`
+      UPDATE "profiles"
+      SET 
+        "one_on_one_enabled" = CASE 
+          WHEN "allocated_one_to_one_sessions" > 0 OR "batch" ILIKE '%one%' OR "batch" ILIKE '%1:1%' THEN true
+          ELSE true
+        END,
+        "group_session_enabled" = CASE 
+          WHEN "allocated_group_sessions" > 0 OR "batch" ILIKE '%group%' THEN true
+          ELSE true
+        END,
+        "payment_type" = COALESCE("payment_type", "payment_option", 'full_payment')
+      WHERE "one_on_one_enabled" = false AND "group_session_enabled" = false;
+    `);
+
+    console.log("Creating qualifications table...");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "qualifications" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "name" varchar(255) NOT NULL UNIQUE,
+        "is_active" boolean DEFAULT true NOT NULL,
+        "display_order" integer DEFAULT 0 NOT NULL,
+        "created_by" integer,
+        "created_at" timestamp DEFAULT now() NOT NULL,
+        "updated_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+    await client.query(`ALTER TABLE "qualifications" ADD COLUMN IF NOT EXISTS "created_by" integer;`);
+
+    console.log("Creating qualification_audit_logs table...");
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "qualification_audit_logs" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "qualification_id" integer,
+        "action" varchar(50) NOT NULL,
+        "performed_by" integer,
+        "old_value" text,
+        "new_value" text,
+        "created_at" timestamp DEFAULT now() NOT NULL
+      );
+    `);
+
+    console.log("Adding postal_code and qualification_id columns to users and profiles...");
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "postal_code" varchar(20);`);
+    await client.query(`ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "qualification_id" integer REFERENCES "qualifications"("id") ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "postal_code" varchar(20);`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "qualification_id" integer REFERENCES "qualifications"("id") ON DELETE SET NULL;`);
+
+    console.log("Seeding default qualifications if table is empty...");
+    const qualCheck = await client.query(`SELECT COUNT(*) FROM "qualifications"`);
+    if (parseInt(qualCheck.rows[0].count, 10) === 0) {
+      const defaultQuals = ["SSLC", "Plus Two", "Diploma", "ITI", "Bachelor's Degree", "Master's Degree", "PhD", "Other"];
+      for (let i = 0; i < defaultQuals.length; i++) {
+        await client.query(
+          `INSERT INTO "qualifications" ("name", "is_active", "display_order") VALUES ($1, true, $2) ON CONFLICT DO NOTHING`,
+          [defaultQuals[i], i + 1]
+        );
+      }
+    }
+
+    console.log("Adding session_type, enrollment_status, module_id to profiles and session_type to batches...");
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "session_type" varchar(50) DEFAULT 'group';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "enrollment_status" varchar(50) DEFAULT 'waiting_for_batch';`);
+    await client.query(`ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "module_id" bigint REFERENCES "modules"("id") ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "session_type" varchar(50) DEFAULT 'group';`);
+
     console.log("Migrations applied successfully!");
   } catch (err) {
     console.error("Migration failed:", err);
-    process.exit(1);
+    throw err;
   } finally {
     client.release();
     await pool.end();
   }
 }
 
-applyMigrations();
+if (process.argv[1]?.includes("apply-migrations")) {
+  applyMigrations().catch(() => process.exit(1));
+}
+

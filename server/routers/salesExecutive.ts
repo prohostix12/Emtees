@@ -574,10 +574,16 @@ export const salesExecutiveRouter = createRouter({
         username: z.string().min(3),
         password: z.string().min(6),
         courseId: z.number(),
-        batchId: z.number(),
+        batchId: z.number().optional(),
+        oneOnOneEnabled: z.boolean().default(false),
+        groupSessionEnabled: z.boolean().default(false),
+        preferredClassTime: z.string().min(1, "Preferred class time is required"),
         referralCode: z.string(),
         gender: z.string().optional(),
         dob: z.string().optional(),
+        address: z.string().optional(),
+        postalCode: z.string().optional(),
+        qualificationId: z.number().optional(),
         educationalQualification: z.string().optional(),
         parentName: z.string().optional(),
         parentPhone: z.string().optional(),
@@ -587,6 +593,10 @@ export const salesExecutiveRouter = createRouter({
     )
     .mutation(async ({ input }) => {
       const db = getDb();
+
+      if (!input.oneOnOneEnabled && !input.groupSessionEnabled) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Please select at least one session type (One-on-One or Group)." });
+      }
 
       const exec = await db.query.salesExecutives.findFirst({
         where: eq(salesExecutives.referralCode, input.referralCode),
@@ -626,11 +636,6 @@ export const salesExecutiveRouter = createRouter({
       });
       if (!course) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid course selection." });
 
-      const batch = await db.query.batches.findFirst({
-        where: and(eq(batches.id, input.batchId), eq(batches.status, "active"), eq(batches.moduleId, input.courseId)),
-      });
-      if (!batch) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid batch selection." });
-
       // Admission payment option logic and validations
       const totalCourseFee = course.courseFee ? parseFloat(course.courseFee) : 0;
       const minDownPayment = course.minimumDownPayment ? parseFloat(course.minimumDownPayment) : 0;
@@ -662,6 +667,10 @@ export const salesExecutiveRouter = createRouter({
         salesExecutiveId: exec.id,
         referralCode: input.referralCode,
         registrationSource: "referral",
+        address: input.address || null,
+        postalCode: input.postalCode ? input.postalCode.trim() : null,
+        qualificationId: input.qualificationId || null,
+        educationalQualification: input.educationalQualification || null,
       }).returning({ id: users.id });
 
       const studentId = userResult[0].id;
@@ -716,6 +725,9 @@ export const salesExecutiveRouter = createRouter({
             extraProfileFields: {
               gender: input.gender || null,
               dob: input.dob ? new Date(input.dob) : null,
+              address: input.address || null,
+              postalCode: input.postalCode ? input.postalCode.trim() : null,
+              qualificationId: input.qualificationId || null,
               educationalQualification: input.educationalQualification || null,
               parentName: input.parentName || null,
               parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode} ${parentPhoneNumber}` : (input.parentPhone || null),
@@ -723,6 +735,10 @@ export const salesExecutiveRouter = createRouter({
               parentCountryISO: parentCountryISO || null,
               parentPhoneNumber: parentPhoneNumber || null,
               parentFullInternationalNumber: parentFullInt || null,
+              oneOnOneEnabled: input.oneOnOneEnabled,
+              groupSessionEnabled: input.groupSessionEnabled,
+              preferredClassTime: input.preferredClassTime,
+              paymentType: input.paymentOption,
             }
           });
         } catch (err: any) {

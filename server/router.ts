@@ -11,6 +11,8 @@ import { notificationRouter } from "./routers/notifications";
 import { communityRouter } from "./routers/community";
 import { disciplineRouter } from "./routers/discipline";
 import { salesExecutiveRouter } from "./routers/salesExecutive";
+import { performanceRouter } from "./routers/performance";
+import { qualificationsRouter } from "./routers/qualifications";
 
 
 export const appRouter = createRouter({
@@ -27,6 +29,8 @@ export const appRouter = createRouter({
   community: communityRouter,
   discipline: disciplineRouter,
   salesExecutive: salesExecutiveRouter,
+  performance: performanceRouter,
+  qualifications: qualificationsRouter,
 });
 
 export type AppRouter = typeof appRouter;

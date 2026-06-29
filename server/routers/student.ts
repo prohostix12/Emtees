@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { createRouter, authedQuery } from "../middleware";
 import { getDb } from "../queries/connection";
 import { env } from "../lib/env";
-import { flexibilityRequests, feedback, notifications, payments, profiles, users, batchEnrollments, batches, classes, oneToOneSessions, systemSettings, classBatches } from "@db/schema";
+import { flexibilityRequests, feedback, notifications, payments, profiles, users, batchEnrollments, batches, classes, oneToOneSessions, systemSettings, classBatches, studentFeeConfigurations } from "@db/schema";
 import { sendNotification, sendBulkNotification } from "../lib/notificationEngine";
 import { generateNextEnrollmentId } from "../lib/studentIdGenerator";
 import { recalculateStudentFees } from "../lib/feeHelper";
@@ -705,6 +705,81 @@ export const studentRouter = createRouter({
           courseName: profile?.course || "Course",
         },
       };
+    }),
+
+  enrollInBatch: authedQuery
+    .input(z.object({
+      batchId: z.number(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = getDb();
+      const existing = await db.query.batchEnrollments.findFirst({
+        where: and(
+          eq(batchEnrollments.batchId, input.batchId),
+          eq(batchEnrollments.studentId, ctx.user.id),
+          eq(batchEnrollments.status, "active")
+        ),
+      });
+      if (existing) {
+        throw new TRPCError({ code: "CONFLICT", message: "You are already enrolled in this batch" });
+      }
+
+      const batch = await db.query.batches.findFirst({
+        where: eq(batches.id, input.batchId),
+        with: { module: true },
+      });
+      if (!batch) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
+      }
+
+      let feeConfig = await db.query.studentFeeConfigurations.findFirst({
+        where: eq(studentFeeConfigurations.studentId, ctx.user.id),
+      });
+
+      if (!feeConfig) {
+        const studentUser = await db.query.users.findFirst({
+          where: eq(users.id, ctx.user.id),
+          with: { profile: true },
+        });
+        const defaultTotal = parseFloat(studentUser?.profile?.totalCourseFee || studentUser?.profile?.feesTotal || batch.courseFee || "0");
+        const [inserted] = await db.insert(studentFeeConfigurations).values({
+          studentId: ctx.user.id,
+          totalCourseFee: String(defaultTotal),
+          discount: "0.00",
+          discountType: "flat",
+          finalFee: String(defaultTotal),
+          paymentMode: studentUser?.profile?.paymentOption?.toUpperCase() === "INSTALLMENT" ? "INSTALLMENT" : "FULL_PAYMENT",
+          downPayment: String(defaultTotal),
+          numberOfInstallments: 1,
+        }).returning();
+        feeConfig = inserted;
+      }
+
+      await db.insert(batchEnrollments).values({
+        batchId: input.batchId,
+        studentId: ctx.user.id,
+        paymentType: feeConfig.paymentMode,
+        moduleId: batch.moduleId,
+        studentFeeConfigId: feeConfig.id,
+        assignedTeachers: batch.teacherId ? [batch.teacherId] : [],
+      });
+
+      const existingProfile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, ctx.user.id),
+      });
+
+      if (existingProfile) {
+        await db.update(profiles)
+          .set({
+            batch: batch.name,
+            course: batch.module?.name || existingProfile.course,
+            enrollmentStatus: "enrolled",
+          })
+          .where(eq(profiles.userId, ctx.user.id));
+      }
+
+      await recalculateStudentFees(ctx.user.id);
+      return { success: true };
     }),
 
   createEnrollmentOrder: authedQuery

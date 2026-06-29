@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, desc, and, sql, count, inArray, ne, or, isNull, isNotNull, asc } from "drizzle-orm";
 import { createRouter, authedQuery, adminQuery, teacherQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { users, profiles, batchEnrollments, batches, classes, modules, payments, attendance, privateMessages, feedback, sessionAllocationLogs, oneToOneSessions, studentCourseAuditLogs, studentClassAllocations, attendanceAlerts } from "@db/schema";
+import { users, profiles, batchEnrollments, batches, classes, modules, payments, attendance, privateMessages, feedback, sessionAllocationLogs, oneToOneSessions, studentCourseAuditLogs, studentClassAllocations, attendanceAlerts, qualifications } from "@db/schema";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
 import { sendNotification, sendBulkNotification, getAdminUserIds } from "../lib/notificationEngine";
 import { getNextUniqueId } from "../lib/idGenerator";
@@ -21,9 +21,14 @@ export const studentsRouter = createRouter({
     .input(
       z.object({
         search: z.string().optional(),
-        status: z.enum(["all", "active", "inactive", "pending_enrollment", "alumni"]).default("all"),
+        status: z.enum(["all", "active", "inactive", "pending_enrollment", "waiting_for_batch", "alumni"]).default("all"),
         courseId: z.number().optional(),
         batchId: z.number().optional(),
+        sessionType: z.enum(["all", "one_on_one", "group", "both"]).optional(),
+        preferredClassTime: z.string().optional(),
+        paymentType: z.string().optional(),
+        qualificationId: z.number().optional(),
+        postalCode: z.string().optional(),
         limit: z.number().default(50),
         offset: z.number().default(0),
       }).optional()
@@ -63,8 +68,40 @@ export const studentsRouter = createRouter({
       // Search filters
       if (input?.search) {
         filters.push(
-          sql`(${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.phone} ILIKE ${"%" + input.search + "%"} OR ${users.email} ILIKE ${"%" + input.search + "%"} OR ${users.unionId} ILIKE ${"%" + input.search + "%"} OR ${profiles.enrollmentId} ILIKE ${"%" + input.search + "%"})`
+          sql`(${users.name} ILIKE ${"%" + input.search + "%"} OR ${users.phone} ILIKE ${"%" + input.search + "%"} OR ${users.email} ILIKE ${"%" + input.search + "%"} OR ${users.unionId} ILIKE ${"%" + input.search + "%"} OR ${profiles.enrollmentId} ILIKE ${"%" + input.search + "%"} OR ${users.address} ILIKE ${"%" + input.search + "%"} OR ${profiles.address} ILIKE ${"%" + input.search + "%"} OR ${users.postalCode} ILIKE ${"%" + input.search + "%"} OR ${qualifications.name} ILIKE ${"%" + input.search + "%"})`
         );
+      }
+
+      if (input?.qualificationId) {
+        const qf = or(eq(users.qualificationId, input.qualificationId), eq(profiles.qualificationId, input.qualificationId));
+        if (qf) filters.push(qf);
+      }
+
+      if (input?.postalCode) {
+        const pf = or(sql`${users.postalCode} ILIKE ${"%" + input.postalCode + "%"}`, sql`${profiles.postalCode} ILIKE ${"%" + input.postalCode + "%"}`);
+        if (pf) filters.push(pf);
+      }
+
+      // Session type filter
+      if (input?.sessionType && input.sessionType !== "all") {
+        if (input.sessionType === "one_on_one") {
+          filters.push(eq(profiles.oneOnOneEnabled, true));
+          filters.push(eq(profiles.groupSessionEnabled, false));
+        } else if (input.sessionType === "group") {
+          filters.push(eq(profiles.oneOnOneEnabled, false));
+          filters.push(eq(profiles.groupSessionEnabled, true));
+        } else if (input.sessionType === "both") {
+          filters.push(eq(profiles.oneOnOneEnabled, true));
+          filters.push(eq(profiles.groupSessionEnabled, true));
+        }
+      }
+
+      if (input?.preferredClassTime) {
+        filters.push(eq(profiles.preferredClassTime, input.preferredClassTime));
+      }
+
+      if (input?.paymentType) {
+        filters.push(eq(profiles.paymentType, input.paymentType));
       }
 
       // Status filters
@@ -73,7 +110,7 @@ export const studentsRouter = createRouter({
         filters.push(isNull(profiles.completionDate));
       } else if (input?.status === "inactive") {
         filters.push(eq(users.status, "inactive"));
-      } else if (input?.status === "pending_enrollment") {
+      } else if (input?.status === "pending_enrollment" || input?.status === "waiting_for_batch") {
         filters.push(eq(users.status, "active"));
         filters.push(sql`NOT EXISTS (
           SELECT 1 FROM batch_enrollments
@@ -125,6 +162,7 @@ export const studentsRouter = createRouter({
         .select({ value: count() })
         .from(users)
         .leftJoin(profiles, eq(users.id, profiles.userId))
+        .leftJoin(qualifications, eq(users.qualificationId, qualifications.id))
         .where(where);
       const total = totalRes[0]?.value || 0;
 
@@ -141,6 +179,10 @@ export const studentsRouter = createRouter({
           role: users.role,
           status: users.status,
           avatar: users.avatar,
+          address: users.address,
+          postalCode: users.postalCode,
+          qualificationId: users.qualificationId,
+          qualificationName: qualifications.name,
           createdAt: users.createdAt,
           updatedAt: users.updatedAt,
           batchId: batchEnrollments.batchId,
@@ -156,6 +198,10 @@ export const studentsRouter = createRouter({
             feesPaid: profiles.feesPaid,
             feesBalance: profiles.feesBalance,
             paymentStatus: profiles.paymentStatus,
+            paymentType: profiles.paymentType,
+            oneOnOneEnabled: profiles.oneOnOneEnabled,
+            groupSessionEnabled: profiles.groupSessionEnabled,
+            preferredClassTime: profiles.preferredClassTime,
             minInitialPayment: profiles.minInitialPayment,
             paymentDueDate: profiles.paymentDueDate,
             gracePeriodDays: profiles.gracePeriodDays,
@@ -174,6 +220,9 @@ export const studentsRouter = createRouter({
             activityTimeline: profiles.activityTimeline,
             gender: profiles.gender,
             dob: profiles.dob,
+            address: profiles.address,
+            postalCode: profiles.postalCode,
+            qualificationId: profiles.qualificationId,
             educationalQualification: profiles.educationalQualification,
             parentName: profiles.parentName,
             parentPhone: profiles.parentPhone,
@@ -183,6 +232,7 @@ export const studentsRouter = createRouter({
         })
         .from(users)
         .leftJoin(profiles, eq(users.id, profiles.userId))
+        .leftJoin(qualifications, eq(users.qualificationId, qualifications.id))
         .leftJoin(batchEnrollments, and(eq(users.id, batchEnrollments.studentId), eq(batchEnrollments.status, "active")))
         .leftJoin(batches, eq(batchEnrollments.batchId, batches.id))
         .leftJoin(studentClassAllocations, eq(users.id, studentClassAllocations.studentId))
@@ -242,6 +292,23 @@ export const studentsRouter = createRouter({
       if (!student) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Student not found" });
       }
+
+      let qualificationObj = null;
+      const qualId = student.qualificationId || student.profile?.qualificationId;
+      if (qualId) {
+        qualificationObj = await db.query.qualifications.findFirst({
+          where: eq(qualifications.id, qualId),
+        });
+      }
+
+      const studentWithQual = {
+        ...student,
+        qualification: qualificationObj,
+        profile: student.profile ? {
+          ...student.profile,
+          qualification: qualificationObj,
+        } : null,
+      };
 
       // 1. Fetch Attendance History
       const attendanceList = await db.query.attendance.findMany({
@@ -434,7 +501,7 @@ export const studentsRouter = createRouter({
       } : null;
 
       return {
-        student,
+        student: studentWithQual,
         attendance: attendanceList,
         payments: paymentsList,
         feedback: feedbackList,
@@ -459,7 +526,9 @@ export const studentsRouter = createRouter({
         password: z.string().min(6),
         enrollmentId: z.string().optional(),
         courseId: z.number(),
-        batchId: z.number(),
+        batchId: z.number().optional(),
+        preferredClassTime: z.string().optional(),
+        sessionType: z.enum(["one_on_one", "group", "both"]).default("group"),
         feesTotal: z.number(),
         allocatedOneToOneSessions: z.number().default(0),
         allocatedGroupSessions: z.number().default(0),
@@ -474,6 +543,9 @@ export const studentsRouter = createRouter({
         // Personal Details
         gender: z.string().optional(),
         dob: z.string().optional(),
+        address: z.string().optional(),
+        postalCode: z.string().optional(),
+        qualificationId: z.number().optional(),
         educationalQualification: z.string().optional(),
         parentName: z.string().optional(),
         parentCountryCode: z.string().optional(),
@@ -550,7 +622,7 @@ export const studentsRouter = createRouter({
         finalEnrollmentId = await generateNextEnrollmentId();
       }
 
-      // Validate course and batch
+      // Validate course
       const course = await db.query.modules.findFirst({
         where: eq(modules.id, input.courseId),
       });
@@ -558,11 +630,14 @@ export const studentsRouter = createRouter({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Selected course is invalid or inactive." });
       }
 
-      const batch = await db.query.batches.findFirst({
-        where: eq(batches.id, input.batchId),
-      });
-      if (!batch || batch.status !== "active" || Number(batch.moduleId) !== input.courseId) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Selected batch is invalid or does not match course." });
+      let batch: any = null;
+      if (input.batchId) {
+        batch = await db.query.batches.findFirst({
+          where: eq(batches.id, input.batchId),
+        });
+        if (!batch || batch.status !== "active" || Number(batch.moduleId) !== input.courseId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Selected batch is invalid or does not match course." });
+        }
       }
 
       const hashedPassword = await bcrypt.hash(input.password, 10);
@@ -583,6 +658,10 @@ export const studentsRouter = createRouter({
         role: "student",
         status: "active",
         mustChangePassword: true,
+        address: input.address || null,
+        postalCode: input.postalCode ? input.postalCode.trim() : null,
+        qualificationId: input.qualificationId || null,
+        educationalQualification: input.educationalQualification || null,
       }).returning({ id: users.id });
 
       const userId = result[0]?.id;
@@ -620,14 +699,14 @@ export const studentsRouter = createRouter({
         }
       }
 
-      const sessionsO2O30 = input.allocatedOneToOneSessions ? input.allocatedOneToOneSessions : (batch.oneOnOne30Allocated || 0);
-      const sessionsO2O45 = input.allocatedOneToOneSessions ? 0 : (batch.oneOnOne45Allocated || 0);
-      const sessionsO2O60 = input.allocatedOneToOneSessions ? 0 : (batch.oneOnOne60Allocated || 0);
+      const sessionsO2O30 = input.allocatedOneToOneSessions ? input.allocatedOneToOneSessions : 0;
+      const sessionsO2O45 = 0;
+      const sessionsO2O60 = 0;
       const totalO2O = sessionsO2O30 + sessionsO2O45 + sessionsO2O60;
 
-      const sessionsGroup30 = input.allocatedGroupSessions ? input.allocatedGroupSessions : (batch.group30Allocated || 0);
-      const sessionsGroup45 = input.allocatedGroupSessions ? 0 : (batch.group45Allocated || 0);
-      const sessionsGroup60 = input.allocatedGroupSessions ? 0 : (batch.group60Allocated || 0);
+      const sessionsGroup30 = input.allocatedGroupSessions ? input.allocatedGroupSessions : 0;
+      const sessionsGroup45 = 0;
+      const sessionsGroup60 = 0;
       const totalGroup = sessionsGroup30 + sessionsGroup45 + sessionsGroup60;
 
       const totalAllocated = totalO2O + totalGroup;
@@ -650,8 +729,8 @@ export const studentsRouter = createRouter({
       try {
         await EnrollmentPaymentService.processEnrollment(db, {
           studentId: userId,
-          batchId: input.batchId,
-          moduleId: batch.moduleId,
+          batchId: input.batchId || null,
+          moduleId: input.courseId,
           totalCourseFee: input.feesTotal,
           paymentOption: input.paymentType === "INSTALLMENT" ? "installment" : "full_payment",
           paidAmount: 0, // Unpaid registration initially
@@ -662,7 +741,10 @@ export const studentsRouter = createRouter({
           extraProfileFields: {
             gender: input.gender,
             dob: input.dob ? new Date(input.dob) : null,
-            educationalQualification: input.educationalQualification,
+            address: input.address || null,
+            postalCode: input.postalCode ? input.postalCode.trim() : null,
+            qualificationId: input.qualificationId || null,
+            educationalQualification: input.educationalQualification || null,
             parentName: input.parentName,
             parentPhone: parentCountryCode && parentPhoneNumber ? `${parentCountryCode}${parentPhoneNumber}`.replace(/\s+/g, "") : (input.parentPhone ? input.parentPhone.replace(/[^\d+]/g, "") : null),
             parentCountryCode,
@@ -670,6 +752,11 @@ export const studentsRouter = createRouter({
             parentPhoneNumber,
             parentFullInternationalNumber: parentFullInt || null,
             notes: input.notes,
+            preferredClassTime: input.preferredClassTime || null,
+            sessionType: input.sessionType,
+            enrollmentStatus: input.batchId ? "enrolled" : "waiting_for_batch",
+            oneOnOneEnabled: input.sessionType === "one_on_one" || input.sessionType === "both",
+            groupSessionEnabled: input.sessionType === "group" || input.sessionType === "both",
           }
         });
       } catch (err: any) {
@@ -677,20 +764,22 @@ export const studentsRouter = createRouter({
       }
 
       // Handle capacity warnings
-      const [{ value: activeCount }] = await db
-        .select({ value: count() })
-        .from(batchEnrollments)
-        .where(and(eq(batchEnrollments.batchId, input.batchId), eq(batchEnrollments.status, "active")));
+      if (input.batchId && batch) {
+        const [{ value: activeCount }] = await db
+          .select({ value: count() })
+          .from(batchEnrollments)
+          .where(and(eq(batchEnrollments.batchId, input.batchId), eq(batchEnrollments.status, "active")));
 
-      if (batch.maxStudents != null && activeCount > batch.maxStudents) {
-        const adminIds = await getAdminUserIds();
-        await sendBulkNotification(
-          adminIds,
-          "Batch Overcrowded",
-          `Batch "${batch.name}" has exceeded its maximum capacity (${activeCount}/${batch.maxStudents}).`,
-          "capacity_alert",
-          { batchId: input.batchId, activeCount, maxStudents: batch.maxStudents }
-        );
+        if (batch.maxStudents != null && activeCount > batch.maxStudents) {
+          const adminIds = await getAdminUserIds();
+          await sendBulkNotification(
+            adminIds,
+            "Batch Overcrowded",
+            `Batch "${batch.name}" has exceeded its maximum capacity (${activeCount}/${batch.maxStudents}).`,
+            "capacity_alert",
+            { batchId: input.batchId, activeCount, maxStudents: batch.maxStudents }
+          );
+        }
       }
 
       // Send credential email
@@ -738,12 +827,18 @@ export const studentsRouter = createRouter({
         batch: z.string().optional(),
         courseId: z.number().optional(),
         batchId: z.number().optional(),
+        oneOnOneEnabled: z.boolean().optional(),
+        groupSessionEnabled: z.boolean().optional(),
+        preferredClassTime: z.string().optional(),
         feesTotal: z.number().optional(),
-        paymentType: z.enum(["FULL_PAYMENT", "INSTALLMENT"]).optional(),
+        paymentType: z.string().optional(),
         completionDate: z.string().nullable().optional(),
         // Personal details
         gender: z.string().optional(),
         dob: z.string().nullable().optional(),
+        address: z.string().optional(),
+        postalCode: z.string().optional(),
+        qualificationId: z.number().nullable().optional(),
         educationalQualification: z.string().optional(),
         parentName: z.string().optional(),
         parentCountryCode: z.string().optional(),
@@ -756,7 +851,7 @@ export const studentsRouter = createRouter({
     )
     .mutation(async ({ ctx, input }) => {
       const db = getDb();
-      const { id, course, batch, courseId, batchId, feesTotal, completionDate, gender, dob, educationalQualification, parentName, parentPhone, notes, enrollmentId, paymentType, ...userData } = input;
+      const { id, course, batch, courseId, batchId, oneOnOneEnabled, groupSessionEnabled, preferredClassTime, feesTotal, completionDate, gender, dob, address, postalCode, qualificationId, educationalQualification, parentName, parentPhone, notes, enrollmentId, paymentType, ...userData } = input;
 
       const currentStudent = await db.query.users.findFirst({
         where: eq(users.id, id),
@@ -831,13 +926,34 @@ export const studentsRouter = createRouter({
 
       const profileUpdate: any = {
         gender,
-        educationalQualification,
         parentName,
         notes,
       };
 
+      if (address !== undefined) {
+        updateData.address = address;
+        profileUpdate.address = address;
+      }
+      if (postalCode !== undefined) {
+        const trimmedCode = postalCode ? postalCode.trim() : null;
+        updateData.postalCode = trimmedCode;
+        profileUpdate.postalCode = trimmedCode;
+      }
+      if (qualificationId !== undefined) {
+        updateData.qualificationId = qualificationId;
+        profileUpdate.qualificationId = qualificationId;
+      }
+      if (educationalQualification !== undefined) {
+        updateData.educationalQualification = educationalQualification;
+        profileUpdate.educationalQualification = educationalQualification;
+      }
+
       if (course !== undefined) profileUpdate.course = course;
       if (batch !== undefined) profileUpdate.batch = batch;
+      if (oneOnOneEnabled !== undefined) profileUpdate.oneOnOneEnabled = oneOnOneEnabled;
+      if (groupSessionEnabled !== undefined) profileUpdate.groupSessionEnabled = groupSessionEnabled;
+      if (preferredClassTime !== undefined) profileUpdate.preferredClassTime = preferredClassTime;
+      if (paymentType !== undefined) profileUpdate.paymentType = paymentType;
 
       if (parentCountryCode !== undefined) profileUpdate.parentCountryCode = parentCountryCode;
       if (parentCountryISO !== undefined) profileUpdate.parentCountryISO = parentCountryISO;
@@ -1067,6 +1183,35 @@ export const studentsRouter = createRouter({
         }
         if (input.paymentType !== undefined) {
           profileUpdate.paymentOption = input.paymentType === "INSTALLMENT" ? "installment" : "full_payment";
+        }
+
+        // Audit student profile details changes
+        if (address !== undefined && address !== currentStudent.address) {
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId: id,
+            changedBy: ctx.user.id,
+            changeType: "address_changed",
+            oldValue: currentStudent.address || "None",
+            newValue: address || "None",
+          });
+        }
+        if (postalCode !== undefined && postalCode?.trim() !== currentStudent.postalCode) {
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId: id,
+            changedBy: ctx.user.id,
+            changeType: "postal_code_changed",
+            oldValue: currentStudent.postalCode || "None",
+            newValue: postalCode ? postalCode.trim() : "None",
+          });
+        }
+        if (qualificationId !== undefined && qualificationId !== currentStudent.qualificationId) {
+          await tx.insert(studentCourseAuditLogs).values({
+            studentId: id,
+            changedBy: ctx.user.id,
+            changeType: "qualification_changed",
+            oldValue: String(currentStudent.qualificationId || "None"),
+            newValue: String(qualificationId || "None"),
+          });
         }
 
         // Apply profile table updates
@@ -1856,26 +2001,80 @@ export const studentsRouter = createRouter({
       const enriched = await Promise.all(allAllocations.map(async (record) => {
         const alloc = record.allocation as any;
         
+        const activeEnrollment = await db.query.batchEnrollments.findFirst({
+          where: and(
+            eq(batchEnrollments.studentId, record.studentId),
+            eq(batchEnrollments.status, "active")
+          )
+        });
+
+        const assignedTeachers = Array.isArray(activeEnrollment?.assignedTeachers) ? (activeEnrollment?.assignedTeachers as number[]) : [];
+        const o2oTeacherId = assignedTeachers[0] || alloc?.oneToOne?.teacherId || null;
+        const groupTeacherId = assignedTeachers[1] || assignedTeachers[0] || alloc?.group?.teacherId || null;
+        const batchId = activeEnrollment?.batchId || alloc?.group?.batchId || null;
+
         let o2oTeacher = null;
-        if (alloc?.oneToOne?.teacherId) {
-          o2oTeacher = await db.query.users.findFirst({ where: eq(users.id, alloc.oneToOne.teacherId) });
+        if (o2oTeacherId) {
+          o2oTeacher = await db.query.users.findFirst({ where: eq(users.id, o2oTeacherId) });
         }
 
         let groupTeacher = null;
-        if (alloc?.group?.teacherId) {
-          groupTeacher = await db.query.users.findFirst({ where: eq(users.id, alloc.group.teacherId) });
+        if (groupTeacherId) {
+          groupTeacher = await db.query.users.findFirst({ where: eq(users.id, groupTeacherId) });
         }
 
         let groupBatch = null;
-        if (alloc?.group?.batchId) {
-          groupBatch = await db.query.batches.findFirst({ where: eq(batches.id, alloc.group.batchId) });
+        if (batchId) {
+          groupBatch = await db.query.batches.findFirst({ where: eq(batches.id, batchId) });
         }
+
+        const o30Alloc = activeEnrollment?.oneOnOne30Allocated ?? alloc?.oneToOne?.sessions30 ?? 0;
+        const o45Alloc = activeEnrollment?.oneOnOne45Allocated ?? alloc?.oneToOne?.sessions45 ?? 0;
+        const o60Alloc = activeEnrollment?.oneOnOne60Allocated ?? alloc?.oneToOne?.sessions60 ?? 0;
+        const o30Used = activeEnrollment?.oneOnOne30Used ?? alloc?.oneToOne?.completed30 ?? 0;
+        const o45Used = activeEnrollment?.oneOnOne45Used ?? alloc?.oneToOne?.completed45 ?? 0;
+        const o60Used = activeEnrollment?.oneOnOne60Used ?? alloc?.oneToOne?.completed60 ?? 0;
+
+        const g30Alloc = activeEnrollment?.group30Allocated ?? alloc?.group?.sessions30 ?? 0;
+        const g45Alloc = activeEnrollment?.group45Allocated ?? alloc?.group?.sessions45 ?? 0;
+        const g60Alloc = activeEnrollment?.group60Allocated ?? alloc?.group?.sessions60 ?? 0;
+        const g30Used = activeEnrollment?.group30Used ?? alloc?.group?.completed30 ?? 0;
+        const g45Used = activeEnrollment?.group45Used ?? alloc?.group?.completed45 ?? 0;
+        const g60Used = activeEnrollment?.group60Used ?? alloc?.group?.completed60 ?? 0;
+
+        const effectiveAllocation = {
+          oneToOne: {
+            teacherId: o2oTeacherId,
+            sessions30: o30Alloc,
+            sessions45: o45Alloc,
+            sessions60: o60Alloc,
+            completed30: o30Used,
+            completed45: o45Used,
+            completed60: o60Used,
+            remaining30: Math.max(0, o30Alloc - o30Used),
+            remaining45: Math.max(0, o45Alloc - o45Used),
+            remaining60: Math.max(0, o60Alloc - o60Used),
+          },
+          group: {
+            teacherId: groupTeacherId,
+            batchId,
+            sessions30: g30Alloc,
+            sessions45: g45Alloc,
+            sessions60: g60Alloc,
+            completed30: g30Used,
+            completed45: g45Used,
+            completed60: g60Used,
+            remaining30: Math.max(0, g30Alloc - g30Used),
+            remaining45: Math.max(0, g45Alloc - g45Used),
+            remaining60: Math.max(0, g60Alloc - g60Used),
+          }
+        };
 
         return {
           id: record.id,
           studentId: record.studentId,
           student: record.student,
-          allocation: alloc,
+          allocation: effectiveAllocation,
           o2oTeacher,
           groupTeacher,
           groupBatch,

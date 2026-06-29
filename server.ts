@@ -21,6 +21,7 @@ import { Server } from "socket.io";
 import { setIo } from "./server/lib/socketInstance";
 import { setupSocketHandlers } from "./server/lib/socketHandlers";
 import { startScheduler } from "./server/lib/scheduler";
+import { applyMigrations } from "./db/apply-migrations";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "localhost";
@@ -29,7 +30,7 @@ const port = parseInt(process.env.PORT || "3000", 10);
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-app.prepare().then(() => {
+app.prepare().then(async () => {
   const server = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url || "", true);
@@ -51,6 +52,11 @@ app.prepare().then(() => {
   console.log("[socket.io] WebSocket server attached to Next.js server");
 
   if (!process.env.VERCEL) {
+    try {
+      await applyMigrations();
+    } catch (e) {
+      console.error("[migration] Failed to run migrations on boot:", e);
+    }
     startScheduler();
     console.log("[scheduler] Background scheduler started");
   }

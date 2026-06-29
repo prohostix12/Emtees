@@ -111,6 +111,9 @@ export default function ReportsPage() {
           <tr><td>Enrollment ID</td><td>${data.profile?.enrollmentId || "-"}</td></tr>
           <tr><td>Phone Number</td><td>${data.student.phone || "-"}</td></tr>
           <tr><td>Email Address</td><td>${data.student.email || "-"}</td></tr>
+          <tr><td>Qualification</td><td>${(data.student as any).qualification?.name || (data.profile as any)?.qualification?.name || (data.student as any).qualificationName || data.profile?.educationalQualification || (data.student as any).educationalQualification || "-"}</td></tr>
+          <tr><td>Postal Code</td><td>{(data.student as any).postalCode || data.profile?.postalCode || "-"}</td></tr>
+          <tr><td>Address</td><td>{(data.student as any).address || data.profile?.address || "-"}</td></tr>
           <tr><td>Gender</td><td>${data.profile?.gender || "-"}</td></tr>
           <tr><td>Date of Birth</td><td>${data.profile?.dob ? new Date(data.profile.dob).toLocaleDateString() : "-"}</td></tr>
           <tr><td>Registration Date</td><td>${new Date(data.student.createdAt).toLocaleDateString()}</td></tr>
@@ -341,7 +344,7 @@ export default function ReportsPage() {
           <tr><td>Gender</td><td>${data.profile?.gender || "-"}</td></tr>
           <tr><td>Date of Birth</td><td>${data.profile?.dob ? new Date(data.profile.dob).toLocaleDateString() : "-"}</td></tr>
           <tr><td>Joining Date</td><td>${data.teacher.createdAt ? new Date(data.teacher.createdAt).toLocaleDateString() : "-"}</td></tr>
-          <tr><td>Qualification</td><td>${data.profile?.educationalQualification || "-"}</td></tr>
+          <tr><td>Qualification</td><td>${(data.teacher as any).qualification?.name || (data.profile as any)?.qualification?.name || data.profile?.educationalQualification || "-"}</td></tr>
           <tr><td>Specialization</td><td>${data.profile?.specialization || "-"}</td></tr>
           <tr><td>Experience</td><td>${data.profile?.experience || "-"}</td></tr>
           <tr><td>Status</td><td>${data.teacher.status}</td></tr>

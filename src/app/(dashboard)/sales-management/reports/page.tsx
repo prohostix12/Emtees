@@ -88,6 +88,9 @@ export default function SalesReportsPage() {
     const headers = [
       "Student ID",
       "Student Name",
+      "Qualification",
+      "Address",
+      "Postal Code",
       "Course",
       "Registration Date",
       "Referral Code Used",
@@ -98,6 +101,9 @@ export default function SalesReportsPage() {
     const rows = registrationsData.map((r) => [
       r.profile?.enrollmentId || r.unionId,
       r.name,
+      r.profile?.educationalQualification || r.educationalQualification || "-",
+      r.address || r.profile?.address || "-",
+      r.postalCode || r.profile?.postalCode || "-",
       r.profile?.course || "-",
       new Date(r.createdAt).toLocaleDateString(),
       r.referralCode || "-",

@@ -4,7 +4,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useSocket } from "@/hooks/useSocket";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Play, Square, Video, Calendar, Clock, XCircle, ClipboardList, Edit3 } from "lucide-react";
+import { Plus, Play, Square, Video, Calendar, Clock, XCircle, ClipboardList, Edit3, CheckCircle } from "lucide-react";
 import dynamic from "next/dynamic";
 const JitsiMeet = dynamic(() => import("@/components/JitsiMeet"), { ssr: false });
 
@@ -1178,106 +1178,381 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
     );
   };
 
-  const renderBalancesTable = (sessionTypeFilter: "one_to_one" | "group") => {
-    const list = allocationsQuery.data || [];
-    const filtered = list.filter(item => {
-      const alloc = item.allocation as any;
-      if (sessionTypeFilter === "one_to_one") {
-        return (alloc?.oneToOne?.sessions30 || 0) + (alloc?.oneToOne?.sessions45 || 0) + (alloc?.oneToOne?.sessions60 || 0) > 0;
-      } else {
-        return (alloc?.group?.sessions30 || 0) + (alloc?.group?.sessions45 || 0) + (alloc?.group?.sessions60 || 0) > 0;
-      }
-    });
-
-    const isStudent = user?.role === "student";
+  const renderUpcomingClasses = (sessionTypeFilter: "one_to_one" | "group") => {
+    const list = sessionTypeFilter === "one_to_one" ? (oneToOneQuery.data || []) : (data || []);
+    const upcoming = list
+      .filter((cls) => {
+        const isCorrectType = sessionTypeFilter === "one_to_one" ? cls.classType === "one_to_one" : cls.classType === "group";
+        const isFuture = new Date(cls.scheduledAt).getTime() > Date.now();
+        const isScheduledStatus = cls.status === "scheduled" || cls.status === "rescheduled" || cls.status === "reschedule_request_pending";
+        return isCorrectType && isFuture && isScheduledStatus;
+      })
+      .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
 
     return (
-      <Card className="border border-gray-100">
+      <Card className="border border-gray-100 shadow-sm overflow-hidden mb-6">
+        <CardHeader className="bg-slate-50/70 dark:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800 py-3 px-4 flex flex-row items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Calendar className="w-4 h-4 text-emerald-600" />
+            <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+              Upcoming Scheduled Classes
+            </CardTitle>
+          </div>
+        </CardHeader>
         <CardContent className="p-0 overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{isStudent ? (sessionTypeFilter === "one_to_one" ? "Teacher" : "Batch") : "Student"}</TableHead>
-                <TableHead className="text-center">30 Min Bal</TableHead>
-                <TableHead className="text-center">45 Min Bal</TableHead>
-                <TableHead className="text-center">60 Min Bal</TableHead>
-                {!isStudent && sessionTypeFilter === "one_to_one" && <TableHead>Teacher</TableHead>}
-                {!isStudent && sessionTypeFilter === "group" && <TableHead>Batch / Teacher</TableHead>}
-                {!isStudent && <TableHead className="text-right">Actions</TableHead>}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.map((item) => {
-                const alloc = item.allocation as any;
-                const target = sessionTypeFilter === "one_to_one" ? alloc?.oneToOne : alloc?.group;
-                
-                const displayName = isStudent
-                  ? (sessionTypeFilter === "one_to_one" ? item.o2oTeacher?.name : item.groupBatch?.name)
-                  : `${item.student?.name} (${item.student?.profile?.enrollmentId || item.student?.unionId})`;
-
-                const totalRemaining = (target?.remaining30 || 0) + (target?.remaining45 || 0) + (target?.remaining60 || 0);
-
-                return (
-                  <TableRow key={item.id} className="hover:bg-gray-50/50">
-                    <TableCell className="font-semibold text-slate-700 py-3">{displayName}</TableCell>
-                    <TableCell className="text-center font-mono">
-                      <span className="text-emerald-700 font-bold">{target?.remaining30 || 0}</span>
-                      <span className="text-gray-400 text-[10px]"> / {target?.sessions30 || 0}</span>
-                    </TableCell>
-                    <TableCell className="text-center font-mono">
-                      <span className="text-emerald-700 font-bold">{target?.remaining45 || 0}</span>
-                      <span className="text-gray-400 text-[10px]"> / {target?.sessions45 || 0}</span>
-                    </TableCell>
-                    <TableCell className="text-center font-mono">
-                      <span className="text-emerald-700 font-bold">{target?.remaining60 || 0}</span>
-                      <span className="text-gray-400 text-[10px]"> / {target?.sessions60 || 0}</span>
-                    </TableCell>
-                    {!isStudent && sessionTypeFilter === "one_to_one" && (
-                      <TableCell className="text-xs text-slate-600">
-                        {item.o2oTeacher?.name || "Unassigned"}
-                      </TableCell>
-                    )}
-                    {!isStudent && sessionTypeFilter === "group" && (
-                      <TableCell className="text-xs text-slate-600">
-                        <div><b>Batch:</b> {item.groupBatch?.name || "N/A"}</div>
-                        <div><b>Teacher:</b> {item.groupTeacher?.name || "Unassigned"}</div>
-                      </TableCell>
-                    )}
-                    {!isStudent && (
-                      <TableCell className="text-right py-2">
-                        {sessionTypeFilter === "one_to_one" && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-8 text-xs rounded-xl"
-                            onClick={() => {
-                              setSelectedEnrollmentForSchedule(item);
-                              const d = (target?.remaining30 || 0) > 0 ? 30 : ((target?.remaining45 || 0) > 0 ? 45 : 60);
-                              setSelectedScheduleDuration(d);
-                              setScheduleDate(new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16));
-                              setScheduleOpen(true);
-                            }}
-                            disabled={totalRemaining <= 0}
-                          >
-                            <Calendar className="w-3.5 h-3.5 mr-1" /> Schedule
-                          </Button>
-                        )}
-                      </TableCell>
-                    )}
-                  </TableRow>
-                );
-              })}
-              {filtered.length === 0 && (
+          {upcoming.length === 0 ? (
+            <div className="text-center text-gray-500 py-8 text-sm font-medium">
+              No upcoming classes scheduled.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-gray-400 py-10 text-xs">
-                    No allocated class balances found.
-                  </TableCell>
+                  <TableHead>Class Date</TableHead>
+                  <TableHead>Time</TableHead>
+                  <TableHead>Session Type</TableHead>
+                  <TableHead>Course/Module</TableHead>
+                  {sessionTypeFilter === "group" && <TableHead>Batch Name</TableHead>}
+                  <TableHead>Teacher Name</TableHead>
+                  {sessionTypeFilter === "one_to_one" && <TableHead>Student Name</TableHead>}
+                  <TableHead>Status</TableHead>
                 </TableRow>
-              )}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {upcoming.map((cls) => {
+                  const sDate = new Date(cls.scheduledAt);
+                  const dateStr = sDate.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+                  const startTimeStr = sDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                  const endTimeStr = (() => {
+                    const d = new Date(sDate.getTime());
+                    d.setMinutes(d.getMinutes() + (cls.duration || cls.sessionLength || 60));
+                    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                  })();
+
+                  const courseName = cls.batch?.module?.name || cls.batches?.[0]?.module?.name || cls.student?.profile?.course || "-";
+                  const batchName = cls.batches?.map((b: any) => b.name).join(", ") || cls.batch?.name || cls.student?.profile?.batch || "-";
+
+                  return (
+                    <TableRow key={cls.id} className="hover:bg-gray-50/50">
+                      <TableCell className="font-semibold text-slate-700 py-3">{dateStr}</TableCell>
+                      <TableCell className="text-slate-600 font-mono">
+                        {startTimeStr} - {endTimeStr}
+                      </TableCell>
+                      <TableCell className="text-slate-600 capitalize">
+                        {cls.classType === "one_to_one" ? "One-on-One" : "Group"}
+                      </TableCell>
+                      <TableCell className="text-slate-600">{courseName}</TableCell>
+                      {sessionTypeFilter === "group" && (
+                        <TableCell className="text-slate-600">{batchName}</TableCell>
+                      )}
+                      <TableCell className="text-slate-600">{cls.teacher?.name || "Unassigned"}</TableCell>
+                      {sessionTypeFilter === "one_to_one" && (
+                        <TableCell className="text-slate-700 font-semibold">{cls.student?.name || "-"}</TableCell>
+                      )}
+                      <TableCell>
+                        <Badge className="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-50 text-[10px] font-bold uppercase">
+                          {cls.status === "reschedule_request_pending" ? "Reschedule Pending" : cls.status === "rescheduled" ? "Rescheduled" : "Scheduled"}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
+    );
+  };
+
+  const renderBalancesTable = (sessionTypeFilter: "one_to_one" | "group") => {
+    const list = allocationsQuery.data || [];
+    const isStudent = user?.role === "student";
+    const isTeacher = user?.role === "teacher";
+    const isAdminRole = ["super_admin", "admin", "academic_head"].includes(user?.role || "");
+
+    let displayList = list;
+    if (isStudent) {
+      displayList = list.filter(item => item.studentId === user.id);
+    }
+
+    const cardItems: any[] = [];
+
+    displayList.forEach((item) => {
+      const alloc = item.allocation as any;
+      const target = sessionTypeFilter === "one_to_one" ? alloc?.oneToOne : alloc?.group;
+      if (!target) return;
+
+      const durations = [30, 45, 60];
+      durations.forEach((dur) => {
+        const allocated = dur === 30 ? (target.sessions30 || 0) : dur === 45 ? (target.sessions45 || 0) : (target.sessions60 || 0);
+        const remaining = dur === 30 ? (target.remaining30 || 0) : dur === 45 ? (target.remaining45 || 0) : (target.remaining60 || 0);
+        const completed = dur === 30 ? (target.completed30 || 0) : dur === 45 ? (target.completed45 || 0) : (target.completed60 || 0);
+
+        if (allocated > 0) {
+          let activeMeeting: any = null;
+          if (sessionTypeFilter === "one_to_one") {
+            activeMeeting = oneToOneQuery.data?.find((s: any) => 
+              s.studentId === item.studentId && 
+              s.sessionLength === dur && 
+              (s.status === "scheduled" || s.status === "live" || s.status === "rescheduled" || s.status === "reschedule_request_pending")
+            );
+          } else {
+            activeMeeting = data?.find((cls: any) => 
+              cls.batchId === target.batchId && 
+              cls.duration === dur && 
+              (cls.status === "scheduled" || cls.status === "ongoing" || cls.status === "live")
+            );
+          }
+
+          cardItems.push({
+            id: `${item.id}-${sessionTypeFilter}-${dur}`,
+            enrollmentRecord: item,
+            student: item.student,
+            teacher: sessionTypeFilter === "one_to_one" ? item.o2oTeacher : item.groupTeacher,
+            batch: item.groupBatch,
+            sessionType: sessionTypeFilter,
+            duration: dur,
+            allocated,
+            remaining,
+            completed,
+            activeMeeting
+          });
+        }
+      });
+    });
+
+    if (cardItems.length === 0) {
+      return (
+        <Card className="border border-dashed p-8 text-center text-gray-400 bg-slate-50/50 dark:bg-slate-900/50 rounded-2xl">
+          <p className="text-xs font-medium">No allocated sessions found for this category.</p>
+        </Card>
+      );
+    }
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 my-4 text-left">
+        {cardItems.map((card) => {
+          const title = `${card.duration} Minute ${card.sessionType === "one_to_one" ? "One-on-One" : "Group Session"}`;
+          const hasMeeting = !!card.activeMeeting;
+          const isLive = card.activeMeeting?.status === "live" || card.activeMeeting?.status === "ongoing";
+
+          return (
+            <Card key={card.id} className="border border-slate-200 shadow-sm hover:shadow-md transition-all rounded-2xl overflow-hidden flex flex-col justify-between bg-white dark:bg-slate-900">
+              <CardHeader className="bg-slate-50/80 dark:bg-slate-800/50 p-4 border-b border-slate-100 dark:border-slate-800 flex flex-row items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 font-bold text-xs">
+                      {card.duration} Min
+                    </Badge>
+                    <CardTitle className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                      {title}
+                    </CardTitle>
+                  </div>
+                  {!isStudent && (
+                    <p className="text-xs text-slate-600 dark:text-slate-400 font-medium mt-1">
+                      Student: <span className="font-semibold text-slate-800 dark:text-slate-200">{card.student?.name}</span>
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    {card.sessionType === "one_to_one" 
+                      ? `Teacher: ${card.teacher?.name || "Unassigned"}` 
+                      : `Batch: ${card.batch?.name || "N/A"} (${card.teacher?.name || "Unassigned"})`}
+                  </p>
+                </div>
+
+                <div className="text-right shrink-0">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 block">Remaining</span>
+                  <span className="text-lg font-extrabold text-emerald-600 font-mono">{card.remaining}</span>
+                  <span className="text-[10px] text-slate-400 font-mono block">/ {card.allocated} total</span>
+                </div>
+              </CardHeader>
+
+              <CardContent className="p-4 flex-1 flex flex-col justify-center">
+                {hasMeeting ? (
+                  <div className="bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5" /> Scheduled Meeting
+                      </span>
+                      {isLive ? (
+                        <Badge className="bg-rose-500 text-white animate-pulse text-[10px]">🔴 Live</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] bg-white text-slate-600">Scheduled</Badge>
+                      )}
+                    </div>
+                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      {new Date(card.activeMeeting.scheduledAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 rounded-xl p-3 text-center">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 block">
+                      {isStudent ? "Schedule Not Available" : "No Meeting Scheduled Currently"}
+                    </span>
+                  </div>
+                )}
+              </CardContent>
+
+              <CardFooter className="bg-slate-50/40 dark:bg-slate-800/20 p-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-1.5 flex-wrap">
+                {/* STUDENT ACTIONS */}
+                {isStudent && (
+                  hasMeeting ? (
+                    <Button
+                      size="sm"
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl"
+                      onClick={() => {
+                        if (card.sessionType === "one_to_one") {
+                          handleJoinOneToOne(card.activeMeeting);
+                        } else {
+                          setSelectedClassForMeeting(card.activeMeeting);
+                          setJitsiRoom(card.activeMeeting.roomName || `emtees-class-${card.activeMeeting.id}`);
+                        }
+                      }}
+                    >
+                      <Video className="w-3.5 h-3.5 mr-1" /> Join Class
+                    </Button>
+                  ) : (
+                    <Badge variant="outline" className="text-xs text-slate-400 border-slate-200 py-1 px-3">
+                      Schedule Not Available
+                    </Badge>
+                  )
+                )}
+
+                {/* TEACHER ACTIONS */}
+                {isTeacher && (
+                  <>
+                    {hasMeeting ? (
+                      <>
+                        <Button
+                          size="sm"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded-xl"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") {
+                              handleJoinOneToOne(card.activeMeeting);
+                            } else {
+                              setSelectedClassForMeeting(card.activeMeeting);
+                              setJitsiRoom(card.activeMeeting.roomName || `emtees-class-${card.activeMeeting.id}`);
+                            }
+                          }}
+                        >
+                          <Video className="w-3.5 h-3.5 mr-1" /> Join
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-xs rounded-xl"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") handleOpenEditOto(card.activeMeeting);
+                            else {
+                              setEditingClassId(card.activeMeeting.id);
+                              setEditOpen(true);
+                            }
+                          }}
+                        >
+                          <Edit3 className="w-3.5 h-3.5 mr-1" /> Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-xs rounded-xl text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") {
+                              endOneToOne.mutate({ sessionId: card.activeMeeting.id });
+                            }
+                          }}
+                          disabled={endOneToOne.isPending}
+                        >
+                          <CheckCircle className="w-3.5 h-3.5 mr-1" /> Complete
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs rounded-xl border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                        onClick={() => {
+                          setSelectedEnrollmentForSchedule(card.enrollmentRecord);
+                          setSelectedScheduleDuration(card.duration);
+                          setScheduleDate(new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16));
+                          setScheduleOpen(true);
+                        }}
+                        disabled={card.remaining <= 0}
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1" /> Schedule Session
+                      </Button>
+                    )}
+                  </>
+                )}
+
+                {/* ADMIN / SUPER ADMIN / ACADEMIC HEAD ACTIONS */}
+                {isAdminRole && (
+                  <>
+                    {hasMeeting ? (
+                      <>
+                        <Button
+                          size="sm"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded-xl"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") {
+                              handleJoinOneToOne(card.activeMeeting);
+                            } else {
+                              setSelectedClassForMeeting(card.activeMeeting);
+                              setJitsiRoom(card.activeMeeting.roomName || `emtees-class-${card.activeMeeting.id}`);
+                            }
+                          }}
+                        >
+                          <Video className="w-3.5 h-3.5 mr-1" /> Join
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-xs rounded-xl"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") handleOpenEditOto(card.activeMeeting);
+                            else {
+                              setEditingClassId(card.activeMeeting.id);
+                              setEditOpen(true);
+                            }
+                          }}
+                        >
+                          <Edit3 className="w-3.5 h-3.5 mr-1" /> Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-xs rounded-xl text-rose-600 border-rose-200 hover:bg-rose-50"
+                          onClick={() => {
+                            if (card.sessionType === "one_to_one") {
+                              cancelOneToOne.mutate({ sessionId: card.activeMeeting.id });
+                            }
+                          }}
+                        >
+                          <XCircle className="w-3.5 h-3.5 mr-1" /> Cancel
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        size="sm"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded-xl font-semibold"
+                        onClick={() => {
+                          setSelectedEnrollmentForSchedule(card.enrollmentRecord);
+                          setSelectedScheduleDuration(card.duration);
+                          setScheduleDate(new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16));
+                          setScheduleOpen(true);
+                        }}
+                        disabled={card.remaining <= 0}
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1" /> Create Session
+                      </Button>
+                    )}
+                  </>
+                )}
+              </CardFooter>
+            </Card>
+          );
+        })}
+      </div>
     );
   };
 
@@ -1758,6 +2033,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                 </Tabs>
               </TabsContent>
               <TabsContent value="balances" className="space-y-4">
+                {renderUpcomingClasses("group")}
                 {renderBalancesTable("group")}
               </TabsContent>
             </Tabs>
@@ -1780,6 +2056,7 @@ export default function ClassesPage({ type }: { type?: "group" | "one-to-one" })
                 {renderOneToOneList()}
               </TabsContent>
               <TabsContent value="balances" className="space-y-4">
+                {renderUpcomingClasses("one_to_one")}
                 {renderBalancesTable("one_to_one")}
               </TabsContent>
             </Tabs>

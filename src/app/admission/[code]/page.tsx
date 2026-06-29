@@ -8,9 +8,25 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { GraduationCap, ArrowRight, UserCheck, ShieldCheck } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { PhoneNumberInput } from "@/components/PhoneNumberInput";
+
+const PREFERRED_TIME_SLOTS = [
+  "7:00 AM",
+  "8:00 AM",
+  "9:00 AM",
+  "10:00 AM",
+  "11:00 AM",
+  "12:00 PM",
+  "2:00 PM",
+  "4:00 PM",
+  "6:00 PM",
+  "7:00 PM",
+  "8:00 PM"
+];
 
 export default function AdmissionPage() {
   const params = useParams();
@@ -22,13 +38,17 @@ export default function AdmissionPage() {
   const [countryISO, setCountryISO] = useState("IN");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [email, setEmail] = useState("");
+  const [address, setAddress] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+  const [qualificationId, setQualificationId] = useState<string>("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
-  const [selectedBatchId, setSelectedBatchId] = useState<string>("");
+  const [oneOnOneEnabled, setOneOnOneEnabled] = useState(false);
+  const [groupSessionEnabled, setGroupSessionEnabled] = useState(false);
+  const [preferredClassTime, setPreferredClassTime] = useState("");
   const [gender, setGender] = useState("");
   const [paymentOption, setPaymentOption] = useState<"full_payment" | "installment">("full_payment");
-  const [downPayment, setDownPayment] = useState<string>("");
   const [dob, setDob] = useState("");
   const [educationalQualification, setEducationalQualification] = useState("");
   const [parentName, setParentName] = useState("");
@@ -46,6 +66,8 @@ export default function AdmissionPage() {
       retry: false,
     }
   );
+
+  const activeQualificationsQuery = trpc.qualifications.listActive.useQuery();
 
   useEffect(() => {
     if (referralInfoQuery.error) {
@@ -68,8 +90,23 @@ export default function AdmissionPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name || !phoneNumber || !username || !password || !selectedCourseId || !selectedBatchId) {
-      toast.error("Please fill in all required fields.");
+    if (!name || !phoneNumber || !username || !password || !selectedCourseId) {
+      toast.error("Please fill in all required basic fields.");
+      return;
+    }
+
+    if (postalCode && !/^\d+$/.test(postalCode.trim())) {
+      toast.error("Postal code must contain numbers only.");
+      return;
+    }
+
+    if (!oneOnOneEnabled && !groupSessionEnabled) {
+      toast.error("Please select at least one Session Type (One-on-One or Group).");
+      return;
+    }
+
+    if (!preferredClassTime) {
+      toast.error("Please select your Preferred Class Time.");
       return;
     }
 
@@ -78,15 +115,7 @@ export default function AdmissionPage() {
       ? `${parentCountryCode}${parentPhoneNumber}`.replace(/\s+/g, "")
       : undefined;
 
-    const selectedCourse = courses?.find(c => c.id === Number(selectedCourseId));
-    const minDownPayment = selectedCourse?.minimumDownPayment ? parseFloat(selectedCourse.minimumDownPayment) : 0;
-    if (paymentOption === "installment") {
-      const parsedDP = parseFloat(downPayment) || 0;
-      if (parsedDP < minDownPayment) {
-        toast.error(`Down payment must be at least ₹${minDownPayment.toLocaleString("en-IN")}`);
-        return;
-      }
-    }
+    const qualObj = activeQualificationsQuery.data?.find(q => String(q.id) === qualificationId);
 
     registerMutation.mutate({
       name,
@@ -95,15 +124,19 @@ export default function AdmissionPage() {
       username,
       password,
       courseId: Number(selectedCourseId),
-      batchId: Number(selectedBatchId),
+      oneOnOneEnabled,
+      groupSessionEnabled,
+      preferredClassTime,
       referralCode,
       gender: gender || undefined,
       dob: dob || undefined,
-      educationalQualification: educationalQualification || undefined,
+      address: address || undefined,
+      postalCode: postalCode ? postalCode.trim() : undefined,
+      qualificationId: qualificationId ? Number(qualificationId) : undefined,
+      educationalQualification: qualObj ? qualObj.name : (educationalQualification || undefined),
       parentName: parentName || undefined,
       parentPhone,
       paymentOption,
-      downPayment: parseFloat(downPayment) || 0,
     });
   };
 
@@ -113,25 +146,6 @@ export default function AdmissionPage() {
 
   const salesExec = referralData?.salesExecutive;
   const courses = referralData?.courses || [];
-  const batches = referralData?.batches?.filter(b => b.moduleId === Number(selectedCourseId)) || [];
-
-  const selectedCourse = courses?.find(c => c.id === Number(selectedCourseId));
-  const totalCourseFee = selectedCourse?.courseFee ? parseFloat(selectedCourse.courseFee) : 0;
-  const minDownPayment = selectedCourse?.minimumDownPayment ? parseFloat(selectedCourse.minimumDownPayment) : 0;
-
-  useEffect(() => {
-    if (selectedCourse) {
-      if (paymentOption === "full_payment") {
-        setDownPayment(selectedCourse.courseFee ? String(parseFloat(selectedCourse.courseFee)) : "0");
-      } else {
-        setDownPayment(selectedCourse.minimumDownPayment ? String(parseFloat(selectedCourse.minimumDownPayment)) : "0");
-      }
-    } else {
-      setDownPayment("");
-    }
-  }, [selectedCourseId, paymentOption, selectedCourse]);
-
-  const remainingBalance = Math.max(0, totalCourseFee - (downPayment ? parseFloat(downPayment) || 0 : 0));
 
   if (isLoading) {
     return (
@@ -236,13 +250,10 @@ export default function AdmissionPage() {
         <CardContent className="pt-2">
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Academic details */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
+            <div className="space-y-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
               <div className="space-y-1.5">
                 <Label htmlFor="course" className="text-xs font-semibold text-gray-600">Select Course <span className="text-red-500">*</span></Label>
-                <Select value={selectedCourseId} onValueChange={(val) => {
-                  setSelectedCourseId(val);
-                  setSelectedBatchId("");
-                }}>
+                <Select value={selectedCourseId} onValueChange={setSelectedCourseId}>
                   <SelectTrigger id="course" className="bg-white rounded-lg border-gray-200 text-xs">
                     <SelectValue placeholder="Select Course" />
                   </SelectTrigger>
@@ -254,79 +265,71 @@ export default function AdmissionPage() {
                 </Select>
               </div>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="batch" className="text-xs font-semibold text-gray-600">Select Batch <span className="text-red-500">*</span></Label>
-                <Select value={selectedBatchId} onValueChange={setSelectedBatchId} disabled={!selectedCourseId}>
-                  <SelectTrigger id="batch" className="bg-white rounded-lg border-gray-200 text-xs">
-                    <SelectValue placeholder={selectedCourseId ? "Select Batch" : "Choose course first"} />
-                  </SelectTrigger>
-                  <SelectContent className="text-xs">
-                    {batches.map((batch) => (
-                      <SelectItem key={batch.id} value={batch.id.toString()}>
-                        {batch.name} {batch.timeSlot ? `(${batch.timeSlot})` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              {/* Session Type Checkboxes */}
+              <div className="space-y-2 border-t pt-3">
+                <Label className="text-xs font-semibold text-gray-700">Session Type <span className="text-red-500">*</span> (Select one or both)</Label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <label className="flex items-center gap-3 p-3 rounded-lg border bg-white cursor-pointer hover:bg-emerald-50/20 transition-colors">
+                    <Checkbox
+                      checked={oneOnOneEnabled}
+                      onCheckedChange={(checked) => setOneOnOneEnabled(!!checked)}
+                    />
+                    <div>
+                      <span className="text-xs font-semibold text-gray-800 block">One-on-One Session</span>
+                      <span className="text-[10px] text-gray-500 block">Personalized 1-to-1 mentoring</span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center gap-3 p-3 rounded-lg border bg-white cursor-pointer hover:bg-emerald-50/20 transition-colors">
+                    <Checkbox
+                      checked={groupSessionEnabled}
+                      onCheckedChange={(checked) => setGroupSessionEnabled(!!checked)}
+                    />
+                    <div>
+                      <span className="text-xs font-semibold text-gray-800 block">Group Session</span>
+                      <span className="text-[10px] text-gray-500 block">Collaborative group learning</span>
+                    </div>
+                  </label>
+                </div>
               </div>
 
-              {selectedCourse && (
-                <>
-                  <div className="space-y-1.5 col-span-1 md:col-span-2 border-t pt-3 mt-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs font-semibold text-gray-600">Course Fee</Label>
-                      <Input
-                        readOnly
-                        value={`₹${totalCourseFee.toLocaleString("en-IN")}`}
-                        className="bg-gray-100 rounded-lg text-xs font-semibold text-gray-700 select-none cursor-not-allowed"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="paymentOption" className="text-xs font-semibold text-gray-600">Payment Option <span className="text-red-500">*</span></Label>
-                      <Select value={paymentOption} onValueChange={(val: any) => setPaymentOption(val)}>
-                        <SelectTrigger id="paymentOption" className="bg-white rounded-lg border-gray-200 text-xs">
-                          <SelectValue placeholder="Select Payment Option" />
-                        </SelectTrigger>
-                        <SelectContent className="text-xs">
-                          <SelectItem value="full_payment">Full Payment</SelectItem>
-                          <SelectItem value="installment">Installment</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
+              {/* Preferred Class Time */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="preferredTime" className="text-xs font-semibold text-gray-600">Preferred Class Time <span className="text-red-500">*</span></Label>
+                  <Select value={preferredClassTime} onValueChange={setPreferredClassTime}>
+                    <SelectTrigger id="preferredTime" className="bg-white rounded-lg border-gray-200 text-xs">
+                      <SelectValue placeholder="Select Preferred Timing" />
+                    </SelectTrigger>
+                    <SelectContent className="text-xs">
+                      {PREFERRED_TIME_SLOTS.map((slot) => (
+                        <SelectItem key={slot} value={slot}>{slot}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-                  {paymentOption === "installment" && (
-                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 bg-emerald-50/30 p-3 rounded-lg border border-emerald-100/50 animate-in fade-in slide-in-from-top-2 duration-205">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="downPayment" className="text-xs font-semibold text-emerald-800">
-                          Down Payment Amount (Min: ₹{minDownPayment.toLocaleString("en-IN")}) <span className="text-red-500">*</span>
-                        </Label>
-                        <Input
-                          id="downPayment"
-                          type="number"
-                          min={minDownPayment}
-                          value={downPayment}
-                          onChange={(e) => setDownPayment(e.target.value)}
-                          className="bg-white rounded-lg text-xs"
-                          required
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold text-emerald-800">Remaining Balance</Label>
-                        <Input
-                          readOnly
-                          value={`₹${remainingBalance.toLocaleString("en-IN")}`}
-                          className="bg-emerald-50/50 rounded-lg text-xs font-semibold text-emerald-955 select-none cursor-not-allowed"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
+                {/* Payment Type */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="paymentOption" className="text-xs font-semibold text-gray-600">Payment Type <span className="text-red-500">*</span></Label>
+                  <Select value={paymentOption} onValueChange={(val: any) => setPaymentOption(val)}>
+                    <SelectTrigger id="paymentOption" className="bg-white rounded-lg border-gray-200 text-xs">
+                      <SelectValue placeholder="Select Payment Type" />
+                    </SelectTrigger>
+                    <SelectContent className="text-xs">
+                      <SelectItem value="full_payment">Full Payment</SelectItem>
+                      <SelectItem value="installment">Installment</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
 
-            {/* Profile fields */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Personal Information */}
+            <div className="space-y-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
+              <h3 className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">Personal Information</h3>
+              
+              {/* 1. Name */}
               <div className="space-y-1.5">
                 <Label htmlFor="name" className="text-xs font-semibold text-gray-600">Full Name <span className="text-red-500">*</span></Label>
                 <Input
@@ -334,11 +337,25 @@ export default function AdmissionPage() {
                   placeholder="e.g. John Doe"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="rounded-lg text-xs"
+                  className="rounded-lg text-xs bg-white h-9"
                   required
                 />
               </div>
 
+              {/* 2. Email */}
+              <div className="space-y-1.5">
+                <Label htmlFor="email" className="text-xs font-semibold text-gray-600">Email Address</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="e.g. john@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="rounded-lg text-xs bg-white h-9"
+                />
+              </div>
+
+              {/* 3. Phone */}
               <PhoneNumberInput
                 id="phone"
                 label="Phone Number"
@@ -353,24 +370,49 @@ export default function AdmissionPage() {
                   setPhoneNumber(data.phoneNumber);
                 }}
               />
-            </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="email" className="text-xs font-semibold text-gray-600">Email Address</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="e.g. john@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="rounded-lg text-xs"
-              />
-            </div>
+              {/* 4. Address */}
+              <div className="space-y-1.5">
+                <Label htmlFor="address" className="text-xs font-semibold text-gray-600">Address</Label>
+                <Textarea
+                  id="address"
+                  placeholder="Enter full postal address"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  className="rounded-lg text-xs bg-white min-h-[70px]"
+                />
+              </div>
 
-            {/* Additional Student Details */}
-            <div className="space-y-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
-              <h3 className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">Additional Details</h3>
+              {/* 5. Postal Code & 6. Qualification */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="postalCode" className="text-xs font-semibold text-gray-600">Postal Code</Label>
+                  <Input
+                    id="postalCode"
+                    placeholder="e.g. 682001"
+                    value={postalCode}
+                    onChange={(e) => setPostalCode(e.target.value)}
+                    className="rounded-lg text-xs bg-white h-9"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="qualification" className="text-xs font-semibold text-gray-600">Qualification</Label>
+                  <Select value={qualificationId} onValueChange={setQualificationId}>
+                    <SelectTrigger id="qualification" className="bg-white rounded-lg border-gray-200 text-xs h-9">
+                      <SelectValue placeholder="Select Qualification" />
+                    </SelectTrigger>
+                    <SelectContent className="text-xs">
+                      {activeQualificationsQuery.data?.map((q) => (
+                        <SelectItem key={q.id} value={String(q.id)}>{q.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {/* 7. Other existing details */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-3 mt-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="gender" className="text-xs font-semibold text-gray-600">Gender</Label>
                   <Select value={gender} onValueChange={setGender}>
@@ -395,17 +437,6 @@ export default function AdmissionPage() {
                     className="rounded-lg text-xs bg-white h-9"
                   />
                 </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="qualification" className="text-xs font-semibold text-gray-600">Highest Qualification</Label>
-                <Input
-                  id="qualification"
-                  placeholder="e.g. B.Tech, Graduation, High School"
-                  value={educationalQualification}
-                  onChange={(e) => setEducationalQualification(e.target.value)}
-                  className="rounded-lg text-xs bg-white h-9"
-                />
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { toast } from "sonner";
-import { Plus, Clock, Users, UserPlus, UserMinus, Trash2, CreditCard, Printer, Wallet, CheckCircle, AlertCircle, Edit } from "lucide-react";
+import { Plus, Clock, Users, UserPlus, UserMinus, Trash2, CreditCard, Printer, Wallet, CheckCircle, AlertCircle, Edit, Lock } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 
@@ -40,12 +40,6 @@ export default function BatchesPage() {
     duration: "",
     status: "active",
     moduleId: 0,
-    oneOnOne30Allocated: 0,
-    oneOnOne45Allocated: 0,
-    oneOnOne60Allocated: 0,
-    group30Allocated: 0,
-    group45Allocated: 0,
-    group60Allocated: 0,
   });
   const [openAuditLogs, setOpenAuditLogs] = useState(false);
   const auditLogsQuery = trpc.learning.listBatchAuditLogs.useQuery(undefined, { enabled: openAuditLogs });
@@ -77,6 +71,18 @@ export default function BatchesPage() {
   const verifyPayment = trpc.student.verifyRazorpayPayment.useMutation();
   const createEnrollmentOrder = trpc.student.createEnrollmentOrder.useMutation();
   const verifyEnrollmentPayment = trpc.student.verifyEnrollmentPayment.useMutation();
+  const studentSelfEnroll = trpc.student.enrollInBatch.useMutation({
+    onSuccess: () => {
+      toast.success("Enrolled in batch successfully!");
+      setOpenEnrollModal(false);
+      if (myProfile.refetch) myProfile.refetch();
+      if (myBatches.refetch) myBatches.refetch();
+      batchesQuery.refetch();
+    },
+    onError: (err) => {
+      toast.error(err.message || "Failed to enroll in batch");
+    },
+  });
 
   const loadRazorpayScript = () => {
     return new Promise((resolve) => {
@@ -404,13 +410,23 @@ export default function BatchesPage() {
     courseFee: 0,
     minimumDownPayment: 0,
   });
-  const [batchForm, setBatchForm] = useState({ moduleId: 0, name: "", timeSlot: "", maxStudents: 30, teacherId: 0, startDate: "", duration: "", courseFee: 0, oneOnOne30Allocated: 0, oneOnOne45Allocated: 0, oneOnOne60Allocated: 0, group30Allocated: 0, group45Allocated: 0, group60Allocated: 0 });
+  const [batchForm, setBatchForm] = useState({ moduleId: 0, name: "", timeSlot: "", sessionType: "group", maxStudents: 30, teacherId: 0, startDate: "", duration: "", courseFee: 0 });
+  const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
+  const matchingStudentsQuery = trpc.learning.getMatchingWaitingStudents.useQuery(
+    { moduleId: batchForm.moduleId, timeSlot: batchForm.timeSlot, sessionType: (batchForm.sessionType as any) || "group" },
+    { enabled: openBatch && batchForm.moduleId > 0 && !!batchForm.timeSlot.trim() }
+  );
   const [enrollBatchId, setEnrollBatchId] = useState<number | null>(null);
   const [enrollStudentId, setEnrollStudentId] = useState("");
   const [enrollPaymentType, setEnrollPaymentType] = useState<"FULL_PAYMENT" | "INSTALLMENT">("FULL_PAYMENT");
   const [enrollFeesTotal, setEnrollFeesTotal] = useState<number>(0);
   const [enrollInstallmentCount, setEnrollInstallmentCount] = useState<number>(2);
   const [enrollInstallments, setEnrollInstallments] = useState<Array<{ installmentNumber: number; amount: number; dueDate?: string }>>([]);
+
+  const studentFeeConfigQuery = trpc.learning.getStudentFeeConfig.useQuery(
+    { studentId: enrollStudentId },
+    { enabled: !!enrollBatchId && !!enrollStudentId.trim() }
+  );
 
   useEffect(() => {
     if (enrollPaymentType === "INSTALLMENT" && enrollFeesTotal > 0) {
@@ -531,21 +547,22 @@ export default function BatchesPage() {
                     e.preventDefault(); 
                     createBatch.mutate({ 
                       ...batchForm, 
+                      sessionType: (batchForm.sessionType as any) || "group",
                       teacherId: batchForm.teacherId || undefined,
                       startDate: batchForm.startDate ? new Date(batchForm.startDate) : undefined,
                       courseFee: batchForm.courseFee || undefined,
                       duration: batchForm.duration || undefined,
-                      oneOnOne30Allocated: batchForm.oneOnOne30Allocated,
-                      oneOnOne45Allocated: batchForm.oneOnOne45Allocated,
-                      oneOnOne60Allocated: batchForm.oneOnOne60Allocated,
-                      group30Allocated: batchForm.group30Allocated,
-                      group45Allocated: batchForm.group45Allocated,
-                      group60Allocated: batchForm.group60Allocated,
+                      studentIds: selectedStudentIds,
                     }); 
                   }} className="space-y-4 mt-2">
                     <div>
                       <label className="text-xs font-semibold text-gray-500 uppercase">Select Module *</label>
-                      <select className="w-full border rounded-md px-3 py-2 text-sm" value={batchForm.moduleId} onChange={(e) => setBatchForm({ ...batchForm, moduleId: Number(e.target.value) })}>
+                      <select className="w-full border rounded-md px-3 py-2 text-sm" value={batchForm.moduleId} onChange={(e) => {
+                        const mId = Number(e.target.value);
+                        const selectedM = modulesQuery.data?.find((m) => m.id === mId);
+                        setBatchForm({ ...batchForm, moduleId: mId, courseFee: selectedM ? parseFloat(selectedM.courseFee || "0") : batchForm.courseFee });
+                        setSelectedStudentIds([]);
+                      }}>
                         <option value={0}>Select Module</option>
                         {modulesQuery.data?.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                       </select>
@@ -560,16 +577,89 @@ export default function BatchesPage() {
                         <Input placeholder="Time Slot (e.g. 7 AM)" value={batchForm.timeSlot} onChange={(e) => setBatchForm({ ...batchForm, timeSlot: e.target.value })} />
                       </div>
                       <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase">Session Type</label>
+                        <select className="w-full border rounded-md px-3 py-2 text-sm" value={batchForm.sessionType} onChange={(e) => setBatchForm({ ...batchForm, sessionType: e.target.value })}>
+                          <option value="group">Group Batch</option>
+                          <option value="both">Both (Group + 1-on-1)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Matching Waiting Students Section */}
+                    <div className="border border-amber-200 rounded-xl p-3 bg-amber-50/50 dark:bg-amber-950/20 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-bold text-xs text-amber-800 dark:text-amber-400 uppercase tracking-wider">
+                          Matching Waiting Students ({matchingStudentsQuery.data?.length || 0})
+                        </h4>
+                        {matchingStudentsQuery.data && matchingStudentsQuery.data.length > 0 && (
+                          <button
+                            type="button"
+                            className="text-[11px] font-semibold text-amber-700 hover:underline"
+                            onClick={() => {
+                              if (selectedStudentIds.length === matchingStudentsQuery.data.length) {
+                                setSelectedStudentIds([]);
+                              } else {
+                                setSelectedStudentIds(matchingStudentsQuery.data.map(s => s.id));
+                              }
+                            }}
+                          >
+                            {selectedStudentIds.length === matchingStudentsQuery.data.length ? "Deselect All" : "Select All"}
+                          </button>
+                        )}
+                      </div>
+
+                      {batchForm.moduleId > 0 && batchForm.timeSlot.trim() ? (
+                        matchingStudentsQuery.isLoading ? (
+                          <p className="text-xs text-amber-600">Filtering matching students...</p>
+                        ) : matchingStudentsQuery.data && matchingStudentsQuery.data.length > 0 ? (
+                          <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
+                            {matchingStudentsQuery.data.map((student: any) => {
+                              const isChecked = selectedStudentIds.includes(student.id);
+                              return (
+                                <label key={student.id} className="flex items-center justify-between p-2 rounded-lg border bg-white dark:bg-slate-900 text-xs cursor-pointer hover:bg-slate-50">
+                                  <div className="flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setSelectedStudentIds([...selectedStudentIds, student.id]);
+                                        } else {
+                                          setSelectedStudentIds(selectedStudentIds.filter(id => id !== student.id));
+                                        }
+                                      }}
+                                      className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    <div>
+                                      <p className="font-medium text-slate-800 dark:text-slate-200">{student.name} ({student.unionId})</p>
+                                      <p className="text-[10px] text-slate-500">Slot: {student.preferredClassTime || "Any"} | Session: {student.sessionType}</p>
+                                    </div>
+                                  </div>
+                                  <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">Matching</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-amber-700">No unassigned waiting students match this module and time slot.</p>
+                        )
+                      ) : (
+                        <p className="text-xs text-amber-700 font-light">Select a Module and enter a Time Slot to view eligible students.</p>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
                         <label className="text-xs font-semibold text-gray-500 uppercase">Max Students</label>
                         <Input type="number" placeholder="Max Students" value={batchForm.maxStudents} onChange={(e) => setBatchForm({ ...batchForm, maxStudents: Number(e.target.value) })} />
                       </div>
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Assigned Teacher</label>
-                      <select className="w-full border rounded-md px-3 py-2 text-sm" value={batchForm.teacherId} onChange={(e) => setBatchForm({ ...batchForm, teacherId: Number(e.target.value) })}>
-                        <option value={0}>Select Teacher (optional)</option>
-                        {teachersQuery.data?.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                      </select>
+                      <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase">Assigned Teacher</label>
+                        <select className="w-full border rounded-md px-3 py-2 text-sm" value={batchForm.teacherId} onChange={(e) => setBatchForm({ ...batchForm, teacherId: Number(e.target.value) })}>
+                          <option value={0}>Select Teacher (optional)</option>
+                          {teachersQuery.data?.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                        </select>
+                      </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
@@ -585,42 +675,8 @@ export default function BatchesPage() {
                        <label className="text-xs font-semibold text-gray-500 uppercase">Course Fee (₹) *</label>
                        <Input type="number" placeholder="e.g. 5000" value={batchForm.courseFee || ""} onChange={(e) => setBatchForm({ ...batchForm, courseFee: Number(e.target.value) })} />
                      </div>
-                     <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-                       <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">One-on-One Sessions Package</h4>
-                       <div className="grid grid-cols-3 gap-2">
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
-                           <Input type="number" min={0} value={batchForm.oneOnOne30Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne30Allocated: Number(e.target.value) })} />
-                         </div>
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
-                           <Input type="number" min={0} value={batchForm.oneOnOne45Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne45Allocated: Number(e.target.value) })} />
-                         </div>
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
-                           <Input type="number" min={0} value={batchForm.oneOnOne60Allocated} onChange={(e) => setBatchForm({ ...batchForm, oneOnOne60Allocated: Number(e.target.value) })} />
-                         </div>
-                       </div>
-                     </div>
-                     <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-                       <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">Group Sessions Package</h4>
-                       <div className="grid grid-cols-3 gap-2">
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
-                           <Input type="number" min={0} value={batchForm.group30Allocated} onChange={(e) => setBatchForm({ ...batchForm, group30Allocated: Number(e.target.value) })} />
-                         </div>
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
-                           <Input type="number" min={0} value={batchForm.group45Allocated} onChange={(e) => setBatchForm({ ...batchForm, group45Allocated: Number(e.target.value) })} />
-                         </div>
-                         <div>
-                           <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
-                           <Input type="number" min={0} value={batchForm.group60Allocated} onChange={(e) => setBatchForm({ ...batchForm, group60Allocated: Number(e.target.value) })} />
-                         </div>
-                       </div>
-                     </div>
                     <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700" disabled={createBatch.isPending}>
-                      {createBatch.isPending ? "Creating..." : "Create Batch"}
+                      {createBatch.isPending ? "Creating..." : `Create Batch (${selectedStudentIds.length} Students)`}
                     </Button>
                   </form>
                 </DialogContent>
@@ -931,94 +987,128 @@ export default function BatchesPage() {
                                   <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto bg-white dark:bg-slate-900 border">
                                     <DialogHeader><DialogTitle>Enroll Student in {batch.name}</DialogTitle></DialogHeader>
                                     <div className="space-y-3 mt-2">
-                                      <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Student ID *</label>
-                                        <Input placeholder="Student ID" type="text" value={enrollStudentId} onChange={(e) => setEnrollStudentId(e.target.value)} />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Course Fee (₹) *</label>
-                                        <Input type="number" placeholder="Fee" value={enrollFeesTotal} onChange={(e) => setEnrollFeesTotal(Number(e.target.value))} />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Payment Mode</label>
-                                        <select
-                                          className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-950 px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
-                                          value={enrollPaymentType}
-                                          onChange={(e) => setEnrollPaymentType(e.target.value as any)}
-                                        >
-                                          <option value="FULL_PAYMENT">Full Payment</option>
-                                          <option value="INSTALLMENT">Installment Payment</option>
-                                        </select>
-                                      </div>
+                                       <div className="space-y-1">
+                                         <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Student ID / Union ID *</label>
+                                         <Input placeholder="Student ID (e.g. STU-1001)" type="text" value={enrollStudentId} onChange={(e) => setEnrollStudentId(e.target.value)} />
+                                       </div>
 
-                                      {enrollPaymentType === "INSTALLMENT" && (
-                                        <div className="space-y-3 mt-2 border p-3 rounded-lg bg-gray-50/50 dark:bg-slate-900/50">
-                                          <div className="space-y-1">
-                                            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Number of Installments</label>
-                                            <Input
-                                              type="number"
-                                              min={2}
-                                              max={12}
-                                              value={enrollInstallmentCount}
-                                              onChange={(e) => setEnrollInstallmentCount(Math.max(2, Number(e.target.value)))}
-                                            />
-                                          </div>
-                                          <div className="space-y-2">
-                                            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider dark:text-gray-400">Installment Schedule</label>
-                                            {enrollInstallments.map((inst, index) => (
-                                              <div key={index} className="grid grid-cols-2 gap-2 border-b pb-2 last:border-b-0">
-                                                <div className="space-y-1">
-                                                  <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400">Installment #{inst.installmentNumber} Amount (₹)</label>
-                                                  <Input
-                                                    type="number"
-                                                    value={inst.amount}
-                                                    onChange={(e) => {
-                                                      const updated = [...enrollInstallments];
-                                                      updated[index].amount = Number(e.target.value);
-                                                      setEnrollInstallments(updated);
-                                                    }}
-                                                  />
-                                                </div>
-                                                <div className="space-y-1">
-                                                  <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400">Due Date (Optional)</label>
-                                                  <Input
-                                                    type="date"
-                                                    value={inst.dueDate || ""}
-                                                    onChange={(e) => {
-                                                      const updated = [...enrollInstallments];
-                                                      updated[index].dueDate = e.target.value;
-                                                      setEnrollInstallments(updated);
-                                                    }}
-                                                  />
-                                                </div>
-                                              </div>
-                                            ))}
-                                            {!isEnrollInstallmentsValid && (
-                                              <p className="text-[11px] text-red-500 font-medium">
-                                                ⚠ Sum of installments (₹{enrollInstallments.reduce((sum, inst) => sum + inst.amount, 0)}) must equal Course Fee (₹{enrollFeesTotal}).
-                                              </p>
-                                            )}
-                                          </div>
-                                        </div>
-                                      )}
+                                       {studentFeeConfigQuery.isLoading && enrollStudentId && (
+                                         <div className="p-3 text-xs text-gray-500 text-center animate-pulse">Loading fee configuration...</div>
+                                       )}
+
+                                       {studentFeeConfigQuery.data && (
+                                         <div className="p-3 border rounded-lg bg-slate-50 dark:bg-slate-800/60 space-y-2 text-xs">
+                                           <div className="font-semibold text-gray-900 dark:text-gray-100 border-b pb-1">
+                                             Student Fee Configuration ({studentFeeConfigQuery.data.studentName})
+                                           </div>
+                                           <div className="grid grid-cols-2 gap-2 pt-1 text-gray-700 dark:text-gray-300">
+                                             <div>Total Course Fee: <span className="font-medium">₹{studentFeeConfigQuery.data.totalCourseFee}</span></div>
+                                             <div>Discount: <span className="font-medium text-emerald-600">₹{studentFeeConfigQuery.data.discount}</span></div>
+                                             <div>Final Fee: <span className="font-semibold text-gray-900 dark:text-white">₹{studentFeeConfigQuery.data.finalFee}</span></div>
+                                             <div>Amount Paid: <span className="font-semibold text-emerald-600">₹{studentFeeConfigQuery.data.amountPaid}</span></div>
+                                             <div className="col-span-2 text-sm font-bold text-indigo-600 dark:text-indigo-400 pt-1 border-t mt-1">
+                                               Remaining Balance: ₹{studentFeeConfigQuery.data.remainingBalance}
+                                             </div>
+                                             <div>Payment Mode: <span className="font-medium">{studentFeeConfigQuery.data.paymentMode}</span></div>
+                                           </div>
+                                           {studentFeeConfigQuery.data.remainingInstallments.length > 0 && (
+                                             <div className="mt-2 pt-2 border-t text-[11px]">
+                                               <div className="font-semibold text-gray-600 dark:text-gray-400 mb-1">Unpaid Installments ({studentFeeConfigQuery.data.remainingInstallments.length})</div>
+                                               {studentFeeConfigQuery.data.remainingInstallments.map((inst, idx) => (
+                                                 <div key={idx} className="flex justify-between py-0.5">
+                                                   <span>Inst #{inst.installmentNumber || idx + 1} ({inst.dueDate ? new Date(inst.dueDate).toLocaleDateString() : 'No due date'}):</span>
+                                                   <span className="font-medium">₹{inst.amount}</span>
+                                                 </div>
+                                               ))}
+                                             </div>
+                                           )}
+                                         </div>
+                                       )}
+
+                                       {!studentFeeConfigQuery.data && (
+                                         <>
+                                           <div className="space-y-1">
+                                             <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Payment Mode</label>
+                                             <select
+                                               className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-950 px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
+                                               value={enrollPaymentType}
+                                               onChange={(e) => setEnrollPaymentType(e.target.value as any)}
+                                             >
+                                               <option value="FULL_PAYMENT">Full Payment</option>
+                                               <option value="INSTALLMENT">Installment Payment</option>
+                                             </select>
+                                           </div>
+
+                                           {enrollPaymentType === "INSTALLMENT" && (
+                                             <div className="space-y-3 mt-2 border p-3 rounded-lg bg-gray-50/50 dark:bg-slate-900/50">
+                                               <div className="space-y-1">
+                                                 <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Number of Installments</label>
+                                                 <Input
+                                                   type="number"
+                                                   min={2}
+                                                   max={12}
+                                                   value={enrollInstallmentCount}
+                                                   onChange={(e) => setEnrollInstallmentCount(Math.max(2, Number(e.target.value)))}
+                                                 />
+                                               </div>
+                                               <div className="space-y-2">
+                                                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider dark:text-gray-400">Installment Schedule</label>
+                                                 {enrollInstallments.map((inst, index) => (
+                                                   <div key={index} className="grid grid-cols-2 gap-2 border-b pb-2 last:border-b-0">
+                                                     <div className="space-y-1">
+                                                       <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400">Installment #{inst.installmentNumber} Amount (₹)</label>
+                                                       <Input
+                                                         type="number"
+                                                         value={inst.amount}
+                                                         onChange={(e) => {
+                                                           const updated = [...enrollInstallments];
+                                                           updated[index].amount = Number(e.target.value);
+                                                           setEnrollInstallments(updated);
+                                                         }}
+                                                       />
+                                                     </div>
+                                                     <div className="space-y-1">
+                                                       <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400">Due Date (Optional)</label>
+                                                       <Input
+                                                         type="date"
+                                                         value={inst.dueDate || ""}
+                                                         onChange={(e) => {
+                                                           const updated = [...enrollInstallments];
+                                                           updated[index].dueDate = e.target.value;
+                                                           setEnrollInstallments(updated);
+                                                         }}
+                                                       />
+                                                     </div>
+                                                   </div>
+                                                 ))}
+                                                 {!isEnrollInstallmentsValid && (
+                                                   <p className="text-[11px] text-red-500 font-medium">
+                                                     ⚠ Sum of installments (₹{enrollInstallments.reduce((sum, inst) => sum + inst.amount, 0)}) must equal Course Fee (₹{enrollFeesTotal}).
+                                                   </p>
+                                                 )}
+                                               </div>
+                                             </div>
+                                           )}
+                                         </>
+                                       )}
 
                                       <Button
                                         className="w-full bg-emerald-600 mt-2"
                                         onClick={() => {
-                                          if (enrollPaymentType === "INSTALLMENT" && !isEnrollInstallmentsValid) {
+                                          if (!studentFeeConfigQuery.data && enrollPaymentType === "INSTALLMENT" && !isEnrollInstallmentsValid) {
                                             toast.error("Installment amounts must sum up to the total course fee");
                                             return;
                                           }
                                           enrollStudent.mutate({
                                             batchId: batch.id,
                                             studentId: isNaN(Number(enrollStudentId)) ? enrollStudentId : Number(enrollStudentId),
-                                            paymentType: enrollPaymentType,
-                                            feesTotal: enrollFeesTotal,
-                                            installments: enrollPaymentType === "INSTALLMENT" ? enrollInstallments : undefined,
+                                            paymentType: (studentFeeConfigQuery.data?.paymentMode as any) || enrollPaymentType,
+                                            feesTotal: studentFeeConfigQuery.data?.finalFee || enrollFeesTotal,
+                                            installments: (!studentFeeConfigQuery.data && enrollPaymentType === "INSTALLMENT") ? enrollInstallments : undefined,
                                           });
                                           setEnrollBatchId(null);
                                         }}
-                                        disabled={!enrollStudentId || (enrollPaymentType === "INSTALLMENT" && !isEnrollInstallmentsValid)}
+                                        disabled={!enrollStudentId || (!studentFeeConfigQuery.data && enrollPaymentType === "INSTALLMENT" && !isEnrollInstallmentsValid)}
                                       >
                                         Enroll
                                       </Button>
@@ -1058,12 +1148,6 @@ export default function BatchesPage() {
                                     duration: batch.duration || "",
                                     status: batch.status || "active",
                                     moduleId: batch.moduleId,
-                                    oneOnOne30Allocated: batch.oneOnOne30Allocated || 0,
-                                    oneOnOne45Allocated: batch.oneOnOne45Allocated || 0,
-                                    oneOnOne60Allocated: batch.oneOnOne60Allocated || 0,
-                                    group30Allocated: batch.group30Allocated || 0,
-                                    group45Allocated: batch.group45Allocated || 0,
-                                    group60Allocated: batch.group60Allocated || 0,
                                   });
                                   setOpenEditBatch(true);
                                 }}
@@ -1474,95 +1558,49 @@ export default function BatchesPage() {
                   <p className="font-semibold text-gray-800 mt-0.5">{selectedEnrollBatch.teacher?.name || "Not assigned"}</p>
                 </div>
 
-                <div className="border-t pt-3">
-                  <span className="text-xs text-gray-400 uppercase font-semibold block mb-2 font-bold text-gray-700">Payment Option</span>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      className={`flex flex-col items-center justify-center p-3 rounded-lg border text-center transition-all ${
-                        enrollPaymentOption === "full_payment"
-                          ? "border-emerald-600 bg-emerald-50 text-emerald-950 font-semibold shadow-sm"
-                          : "border-gray-250 hover:border-gray-300 text-gray-600"
-                      }`}
-                      onClick={() => setEnrollPaymentOption("full_payment")}
-                    >
-                      <span className="text-xs uppercase font-bold tracking-wider">Full Payment</span>
-                      <span className="text-[10px] text-gray-400 font-normal mt-0.5">Pay complete fee now</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={`flex flex-col items-center justify-center p-3 rounded-lg border text-center transition-all ${
-                        enrollPaymentOption === "installment"
-                          ? "border-emerald-600 bg-emerald-50 text-emerald-950 font-semibold shadow-sm"
-                          : "border-gray-250 hover:border-gray-300 text-gray-600"
-                      }`}
-                      onClick={() => {
-                        setEnrollPaymentOption("installment");
-                        setEnrollDownPayment(selectedEnrollBatch.module?.minimumDownPayment || "0");
-                      }}
-                    >
-                      <span className="text-xs uppercase font-bold tracking-wider">Installment</span>
-                      <span className="text-[10px] text-gray-400 font-normal mt-0.5">Pay down payment now</span>
-                    </button>
+                <div className="border-t pt-3 space-y-3">
+                  <div className="flex justify-between items-center bg-slate-50 p-3 rounded-lg border">
+                    <div>
+                      <span className="text-xs text-gray-400 uppercase font-semibold block">Payment Mode</span>
+                      <span className="font-bold text-slate-800 text-sm flex items-center gap-1 mt-0.5">
+                        <Lock className="w-3 h-3 text-gray-400" />
+                        {((myProfile.data as any)?.feeConfig?.paymentMode) || (myProfile.data?.profile?.paymentOption?.toUpperCase() === "INSTALLMENT" ? "INSTALLMENT" : "FULL PAYMENT")}
+                      </span>
+                    </div>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded">
+                      Configured Fee Plan
+                    </span>
                   </div>
-                </div>
 
-                {enrollPaymentOption === "full_payment" ? (
-                  <div className="border-t border-dashed pt-4 flex flex-col gap-2 bg-gray-50 p-4 rounded-xl border">
+                  <div className="border border-dashed pt-3 flex flex-col gap-2 bg-gray-50/70 p-4 rounded-xl">
                     <div className="flex justify-between items-center">
-                      <span className="text-xs text-gray-500 uppercase font-semibold">Total Course Fee</span>
-                      <span className="text-sm font-semibold text-gray-700">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
+                      <span className="text-xs text-gray-500 uppercase font-semibold">Course Fee</span>
+                      <span className="text-sm font-semibold text-gray-700">₹{parseFloat(((myProfile.data as any)?.feeConfig?.totalCourseFee) || myProfile.data?.profile?.totalCourseFee || selectedEnrollBatch.module?.courseFee || "0").toLocaleString("en-IN")}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs text-gray-500 uppercase font-semibold">Already Paid</span>
+                      <span className="text-sm font-semibold text-emerald-600">₹{parseFloat(myProfile.data?.profile?.feesPaid || "0").toLocaleString("en-IN")}</span>
                     </div>
                     <div className="flex justify-between items-center border-t pt-2 mt-1">
                       <div>
-                        <span className="text-xs text-emerald-950 uppercase font-bold">Amount Payable Now</span>
-                        <p className="text-gray-400 text-[10px]">Payment Status = Paid | Balance = 0</p>
+                        <span className="text-xs text-gray-900 uppercase font-bold">Outstanding Balance</span>
+                        <p className="text-[10px] text-gray-400">Ledger balance</p>
                       </div>
-                      <span className="text-2xl font-black text-emerald-600">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="border-t border-dashed pt-4 flex flex-col gap-3 bg-gray-50 p-4 rounded-xl border">
-                    <div className="flex justify-between items-center">
-                      <span className="text-xs text-gray-500 uppercase font-semibold">Total Course Fee</span>
-                      <span className="text-sm font-semibold text-gray-700">₹{parseFloat(selectedEnrollBatch.module?.courseFee ?? "0").toLocaleString("en-IN")}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-xs text-gray-500 uppercase font-semibold">Minimum Down Payment</span>
-                      <span className="text-sm font-semibold text-amber-700">₹{parseFloat(selectedEnrollBatch.module?.minimumDownPayment ?? "0").toLocaleString("en-IN")}</span>
-                    </div>
-                    
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs text-gray-500 uppercase font-semibold">Amount Paying Now (₹) *</label>
-                      <Input
-                        type="number"
-                        value={enrollDownPayment}
-                        onChange={(e) => setEnrollDownPayment(e.target.value)}
-                        placeholder="Enter amount"
-                        className="bg-white border-gray-250 focus-visible:ring-emerald-500"
-                      />
-                    </div>
-
-                    <div className="flex justify-between items-center border-t pt-2 mt-1">
-                      <div>
-                        <span className="text-xs text-gray-900 uppercase font-bold">Remaining Balance</span>
-                        <p className="text-[10px] text-gray-400">Automatically calculated</p>
-                      </div>
-                      <span className="text-xl font-bold text-gray-800">
-                        ₹{Math.max(0, (parseFloat(selectedEnrollBatch.module?.courseFee ?? "0") - (parseFloat(enrollDownPayment) || 0))).toLocaleString("en-IN")}
+                      <span className="text-xl font-bold text-indigo-600 dark:text-indigo-400">
+                        ₹{parseFloat(myProfile.data?.profile?.feesBalance || "0").toLocaleString("en-IN")}
                       </span>
                     </div>
                   </div>
-                )}
+                </div>
 
                 <div className="pt-2">
                   <Button
                     className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-lg shadow-sm flex items-center justify-center gap-2"
-                    onClick={handleEnrollmentPayment}
-                    disabled={createEnrollmentOrder.isPending || verifyEnrollmentPayment.isPending}
+                    onClick={() => studentSelfEnroll.mutate({ batchId: selectedEnrollBatch.id })}
+                    disabled={studentSelfEnroll.isPending}
                   >
-                    <CreditCard className="w-5 h-5" />
-                    Pay & Enroll Now
+                    <CheckCircle className="w-5 h-5" />
+                    {studentSelfEnroll.isPending ? "Enrolling..." : "Confirm & Enroll Now"}
                   </Button>
                 </div>
               </div>
@@ -1685,12 +1723,6 @@ export default function BatchesPage() {
               moduleId: editBatchData.moduleId,
               startDate: editBatchData.startDate ? new Date(editBatchData.startDate) : null,
               duration: editBatchData.duration || null,
-              oneOnOne30Allocated: editBatchData.oneOnOne30Allocated,
-              oneOnOne45Allocated: editBatchData.oneOnOne45Allocated,
-              oneOnOne60Allocated: editBatchData.oneOnOne60Allocated,
-              group30Allocated: editBatchData.group30Allocated,
-              group45Allocated: editBatchData.group45Allocated,
-              group60Allocated: editBatchData.group60Allocated,
             });
           }} className="space-y-4 mt-2">
             <div>
@@ -1741,40 +1773,6 @@ export default function BatchesPage() {
                  <option value="active">Active</option>
                  <option value="inactive">Inactive</option>
                </select>
-             </div>
-             <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-               <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">One-on-One Sessions Package</h4>
-               <div className="grid grid-cols-3 gap-2">
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
-                   <Input type="number" min={0} value={editBatchData.oneOnOne30Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne30Allocated: Number(e.target.value) })} />
-                 </div>
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
-                   <Input type="number" min={0} value={editBatchData.oneOnOne45Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne45Allocated: Number(e.target.value) })} />
-                 </div>
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
-                   <Input type="number" min={0} value={editBatchData.oneOnOne60Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, oneOnOne60Allocated: Number(e.target.value) })} />
-                 </div>
-               </div>
-             </div>
-             <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-3">
-               <h4 className="font-bold text-xs text-emerald-800 uppercase tracking-wider">Group Sessions Package</h4>
-               <div className="grid grid-cols-3 gap-2">
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">30 Min</label>
-                   <Input type="number" min={0} value={editBatchData.group30Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group30Allocated: Number(e.target.value) })} />
-                 </div>
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">45 Min</label>
-                   <Input type="number" min={0} value={editBatchData.group45Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group45Allocated: Number(e.target.value) })} />
-                 </div>
-                 <div>
-                   <label className="text-[10px] font-semibold text-gray-500 uppercase">60 Min</label>
-                   <Input type="number" min={0} value={editBatchData.group60Allocated} onChange={(e) => setEditBatchData({ ...editBatchData, group60Allocated: Number(e.target.value) })} />
-                 </div>
-               </div>
              </div>
             <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white" disabled={updateBatch.isPending}>
               {updateBatch.isPending ? "Saving..." : "Save Changes"}

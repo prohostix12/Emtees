@@ -1,5 +1,5 @@
 import { getDb } from "../queries/connection";
-import { profiles, batchEnrollments, payments } from "@db/schema";
+import { profiles, batchEnrollments, payments, studentFeeConfigurations } from "@db/schema";
 import { eq, and, isNotNull, asc } from "drizzle-orm";
 
 export async function isStudentFeeRestricted(studentId: number): Promise<boolean> {
@@ -33,13 +33,33 @@ export async function isStudentFeeRestricted(studentId: number): Promise<boolean
 export async function recalculateStudentFees(studentId: number): Promise<void> {
   const db = getDb();
 
-  // 1. Fetch the profile
+  // 1. Fetch profile
   const profile = await db.query.profiles.findFirst({
     where: eq(profiles.userId, studentId),
   });
   if (!profile) return;
 
-  // 2. Sum up all paid tuition payments
+  // 2. Fetch or initialize studentFeeConfigurations (Single Source of Truth)
+  let feeConfig = await db.query.studentFeeConfigurations.findFirst({
+    where: eq(studentFeeConfigurations.studentId, studentId),
+  });
+
+  if (!feeConfig) {
+    const defaultTotal = parseFloat(profile.totalCourseFee || profile.feesTotal || "0");
+    const [inserted] = await db.insert(studentFeeConfigurations).values({
+      studentId,
+      totalCourseFee: String(defaultTotal),
+      discount: "0.00",
+      discountType: "flat",
+      finalFee: String(defaultTotal),
+      paymentMode: profile.paymentOption?.toUpperCase() === "INSTALLMENT" ? "INSTALLMENT" : "FULL_PAYMENT",
+      downPayment: profile.downPayment || "0.00",
+      numberOfInstallments: 1,
+    }).returning();
+    feeConfig = inserted;
+  }
+
+  // 3. Sum up all paid tuition payments
   const paidPayments = await db.query.payments.findMany({
     where: and(
       eq(payments.studentId, studentId),
@@ -49,10 +69,8 @@ export async function recalculateStudentFees(studentId: number): Promise<void> {
   });
 
   const feesPaid = paidPayments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
-  const totalCourseFeeFloat = parseFloat(profile.totalCourseFee ?? "0");
-  const feesTotalVal = totalCourseFeeFloat > 0 ? (profile.totalCourseFee ?? "0") : (profile.feesTotal || "0");
-  const feesTotal = parseFloat(feesTotalVal);
-  const feesBalance = Math.max(0, feesTotal - feesPaid);
+  const finalFee = parseFloat(feeConfig.finalFee ?? "0");
+  const feesBalance = Math.max(0, finalFee - feesPaid);
 
   let paymentStatus: "paid" | "partial" | "unpaid" = "unpaid";
   if (feesBalance <= 0) {
@@ -61,7 +79,7 @@ export async function recalculateStudentFees(studentId: number): Promise<void> {
     paymentStatus = "partial";
   }
 
-  // 3. Find the next unpaid installment due date
+  // 4. Find the next unpaid installment due date
   let paymentDueDate: Date | null = null;
   const activeEnrollment = await db.query.batchEnrollments.findFirst({
     where: and(
@@ -84,14 +102,14 @@ export async function recalculateStudentFees(studentId: number): Promise<void> {
     }
   }
 
-  // 4. Update student profile
+  // 5. Update student profile for backward compatibility and quick querying
   await db.update(profiles)
     .set({
       feesPaid: String(feesPaid),
       feesBalance: String(feesBalance),
       remainingBalance: String(feesBalance),
-      totalCourseFee: String(feesTotal),
-      feesTotal: String(feesTotal),
+      totalCourseFee: String(finalFee),
+      feesTotal: String(finalFee),
       paymentStatus,
       paymentDueDate,
     })

@@ -352,8 +352,51 @@ export default function Dashboard() {
       </div>
 
       {user.role === "student" && myProfile.data?.profile && (
-        <div className="space-y-3">
-          <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">My Session Balance</h3>
+        <div className="space-y-4">
+          <Card className="border border-slate-200/60 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm rounded-xl overflow-hidden">
+            <CardContent className="p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 flex items-center justify-center">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold block">Enrolled Session Type</span>
+                  <span className="font-semibold text-gray-800 dark:text-gray-200 text-sm">
+                    {myProfile.data.profile.oneOnOneEnabled && myProfile.data.profile.groupSessionEnabled ? "One-on-One & Group Sessions" : myProfile.data.profile.oneOnOneEnabled ? "One-on-One Session" : myProfile.data.profile.groupSessionEnabled ? "Group Session" : "Standard Enrollment"}
+                  </span>
+                </div>
+              </div>
+
+              {myProfile.data.profile.preferredClassTime && (
+                <div className="flex items-center gap-3 border-l pl-4 dark:border-slate-800">
+                  <div className="w-10 h-10 rounded-lg bg-blue-50 dark:bg-blue-950/40 text-blue-600 flex items-center justify-center">
+                    <Clock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold block">Preferred Class Time</span>
+                    <span className="font-semibold text-gray-800 dark:text-gray-200 text-sm">{myProfile.data.profile.preferredClassTime}</span>
+                  </div>
+                </div>
+              )}
+
+              {myProfile.data.profile.paymentType && (
+                <div className="flex items-center gap-3 border-l pl-4 dark:border-slate-800">
+                  <div className="w-10 h-10 rounded-lg bg-purple-50 dark:bg-purple-950/40 text-purple-600 flex items-center justify-center">
+                    <CreditCard className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold block">Payment Plan</span>
+                    <span className="font-semibold text-gray-800 dark:text-gray-200 text-sm capitalize">
+                      {myProfile.data.profile.paymentType.replace("_", " ")}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <div className="space-y-3">
+            <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200">My Session Balance</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* One-to-One Sessions Card */}
             <Card className="border border-emerald-100 dark:border-emerald-950 bg-gradient-to-br from-emerald-50/20 to-white dark:from-emerald-950/10 dark:to-gray-950 shadow-sm rounded-xl overflow-hidden">
@@ -430,6 +473,7 @@ export default function Dashboard() {
               </CardContent>
             </Card>
           </div>
+        </div>
         </div>
       )}
 

@@ -184,10 +184,12 @@ export const userRouter = createRouter({
         enrollmentId: z.string().optional(),
         gender: z.string().optional(),
         dateOfBirth: z.string().or(z.date()).optional(),
+        qualificationId: z.number().optional(),
         educationalQualification: z.string().optional(),
         specialization: z.string().optional(),
         teachingExperience: z.number().optional(),
         address: z.string().optional(),
+        postalCode: z.string().optional(),
         status: z.enum(["active", "inactive", "suspended", "on_hold"]).optional(),
       })
     )
@@ -420,17 +422,13 @@ export const userRouter = createRouter({
           totalAttendedSessions: 0,
         });
 
-        const oneOnOne30Allocated = input.allocatedOneToOneSessions !== undefined
-          ? input.allocatedOneToOneSessions
-          : (batch?.oneOnOne30Allocated || 0);
-        const oneOnOne45Allocated = input.allocatedOneToOneSessions !== undefined ? 0 : (batch?.oneOnOne45Allocated || 0);
-        const oneOnOne60Allocated = input.allocatedOneToOneSessions !== undefined ? 0 : (batch?.oneOnOne60Allocated || 0);
+        const oneOnOne30Allocated = input.allocatedOneToOneSessions !== undefined ? input.allocatedOneToOneSessions : 0;
+        const oneOnOne45Allocated = 0;
+        const oneOnOne60Allocated = 0;
 
-        const group30Allocated = input.allocatedGroupSessions !== undefined
-          ? input.allocatedGroupSessions
-          : (batch?.group30Allocated || 0);
-        const group45Allocated = input.allocatedGroupSessions !== undefined ? 0 : (batch?.group45Allocated || 0);
-        const group60Allocated = input.allocatedGroupSessions !== undefined ? 0 : (batch?.group60Allocated || 0);
+        const group30Allocated = input.allocatedGroupSessions !== undefined ? input.allocatedGroupSessions : 0;
+        const group45Allocated = 0;
+        const group60Allocated = 0;
 
         // Auto-enroll student in the selected batch
         await db.insert(batchEnrollments).values({
@@ -566,10 +564,12 @@ export const userRouter = createRouter({
         password: z.string().optional(),
         gender: z.string().optional(),
         dateOfBirth: z.string().or(z.date()).optional(),
+        qualificationId: z.number().nullable().optional(),
         educationalQualification: z.string().optional(),
         specialization: z.string().optional(),
         teachingExperience: z.number().optional(),
         address: z.string().optional(),
+        postalCode: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -873,6 +873,7 @@ export const userRouter = createRouter({
       with: {
         profile: true,
         enrollments: true,
+        feeConfig: true,
       },
     });
     if (!user) throw new TRPCError({ code: "NOT_FOUND" });

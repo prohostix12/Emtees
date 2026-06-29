@@ -25,6 +25,7 @@ import {
   sessionAllocationLogs,
   studentIdSequence,
   studentClassAllocations,
+  studentFeeConfigurations,
 } from "@db/schema";
 import { sendNotification } from "../lib/notificationEngine";
 import { updateStudentSessionBalances } from "../lib/sessionHelper";
@@ -1021,6 +1022,7 @@ export const adminRouter = createRouter({
             with: {
               profile: true,
               enrollments: true,
+              feeConfig: true,
             },
           },
           batch: true,
@@ -1196,6 +1198,9 @@ export const adminRouter = createRouter({
     .input(z.object({
       studentId: z.number(),
       feesTotal: z.number().optional(),
+      discount: z.number().optional(),
+      discountType: z.enum(["flat", "percentage"]).optional(),
+      paymentMode: z.enum(["FULL_PAYMENT", "INSTALLMENT"]).optional(),
       feesPaid: z.number().optional(),
       minInitialPayment: z.number().optional(),
       paymentDueDate: z.date().optional(),
@@ -1211,22 +1216,54 @@ export const adminRouter = createRouter({
       });
       if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Student profile not found" });
 
-      const feesTotal = input.feesTotal !== undefined ? String(input.feesTotal) : profile.feesTotal;
-      const feesPaid = input.feesPaid !== undefined ? String(input.feesPaid) : profile.feesPaid;
-      const feesBalance = String(Math.max(0, parseFloat(feesTotal ?? "0") - parseFloat(feesPaid ?? "0")));
+      let feeConfig = await db.query.studentFeeConfigurations.findFirst({
+        where: eq(studentFeeConfigurations.studentId, input.studentId),
+      });
+
+      const currentGross = input.feesTotal !== undefined ? input.feesTotal : parseFloat(feeConfig?.totalCourseFee || profile.totalCourseFee || "0");
+      const currentDiscount = input.discount !== undefined ? input.discount : parseFloat(feeConfig?.discount || "0");
+      const currentDiscountType = input.discountType || feeConfig?.discountType || "flat";
+      
+      let calculatedFinal = currentGross;
+      if (currentDiscountType === "percentage") {
+        calculatedFinal = currentGross - (currentGross * currentDiscount / 100);
+      } else {
+        calculatedFinal = Math.max(0, currentGross - currentDiscount);
+      }
+
+      const paymentMode = input.paymentMode || feeConfig?.paymentMode || "FULL_PAYMENT";
+
+      if (feeConfig) {
+        await db.update(studentFeeConfigurations)
+          .set({
+            totalCourseFee: String(currentGross),
+            discount: String(currentDiscount),
+            discountType: currentDiscountType,
+            finalFee: String(calculatedFinal),
+            paymentMode: paymentMode,
+            updatedAt: new Date(),
+          })
+          .where(eq(studentFeeConfigurations.id, feeConfig.id));
+      } else {
+        await db.insert(studentFeeConfigurations).values({
+          studentId: input.studentId,
+          totalCourseFee: String(currentGross),
+          discount: String(currentDiscount),
+          discountType: currentDiscountType,
+          finalFee: String(calculatedFinal),
+          paymentMode: paymentMode,
+        });
+      }
+
       const minInitialPayment = input.minInitialPayment !== undefined ? String(input.minInitialPayment) : profile.minInitialPayment;
       const paymentDueDate = input.paymentDueDate !== undefined ? input.paymentDueDate : profile.paymentDueDate;
       const gracePeriodDays = input.gracePeriodDays !== undefined ? input.gracePeriodDays : profile.gracePeriodDays;
-
-      const nextPaymentStatus = parseFloat(feesBalance) <= 0 ? "paid" : (parseFloat(feesPaid ?? "0") > 0 ? "partial" : "unpaid");
 
       // Log to activity timeline
       const timeline = Array.isArray(profile.activityTimeline) ? profile.activityTimeline : [];
       timeline.push({
         type: "fee_adjustment",
-        feesTotal,
-        feesPaid,
-        feesBalance,
+        feesTotal: String(calculatedFinal),
         minInitialPayment,
         paymentDueDate: paymentDueDate ? new Date(paymentDueDate).toISOString() : null,
         gracePeriodDays,
@@ -1235,23 +1272,21 @@ export const adminRouter = createRouter({
 
       await db.update(profiles)
         .set({
-          feesTotal,
-          feesPaid,
-          feesBalance,
           minInitialPayment,
           paymentDueDate,
           gracePeriodDays,
-          paymentStatus: nextPaymentStatus,
           activityTimeline: timeline,
-          totalCourseFee: feesTotal,
-          remainingBalance: feesBalance,
         })
         .where(eq(profiles.userId, input.studentId));
 
       await recalculateStudentFees(input.studentId);
 
+      const updatedProfile = await db.query.profiles.findFirst({
+        where: eq(profiles.userId, input.studentId),
+      });
+
       // Reactivate student if fees are fully cleared
-      if (parseFloat(feesBalance) <= 0) {
+      if (parseFloat(updatedProfile?.feesBalance || "0") <= 0) {
         await db.update(batchEnrollments)
           .set({ status: "active" })
           .where(and(
@@ -2492,6 +2527,10 @@ export const adminRouter = createRouter({
           enrollmentId: profiles.enrollmentId,
           course: profiles.course,
           batch: profiles.batch,
+          oneOnOneEnabled: profiles.oneOnOneEnabled,
+          groupSessionEnabled: profiles.groupSessionEnabled,
+          preferredClassTime: profiles.preferredClassTime,
+          paymentType: profiles.paymentType,
         })
         .from(users)
         .leftJoin(profiles, eq(users.id, profiles.userId))
@@ -2501,7 +2540,9 @@ export const adminRouter = createRouter({
             or(
               ilike(users.name, query),
               ilike(users.unionId, query),
-              ilike(profiles.enrollmentId, query)
+              ilike(profiles.enrollmentId, query),
+              ilike(profiles.preferredClassTime, query),
+              ilike(profiles.paymentType, query)
             )
           )
         )

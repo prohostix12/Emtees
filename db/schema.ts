@@ -27,6 +27,28 @@ export const requestTypeEnum = pgEnum("request_type", ["hold", "rejoin", "batch_
 export const requestStatusEnum = pgEnum("request_status", ["pending", "approved", "rejected", "cancelled"]);
 export const materialTypeEnum = pgEnum("material_type", ["text", "voice", "image", "video", "pdf"]);
 
+// Qualifications Master Table
+export const qualifications = pgTable("qualifications", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 255 }).notNull().unique(),
+  isActive: boolean("is_active").default(true).notNull(),
+  displayOrder: integer("display_order").default(0).notNull(),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Qualification Audit Logs Table
+export const qualificationAuditLogs = pgTable("qualification_audit_logs", {
+  id: serial("id").primaryKey(),
+  qualificationId: integer("qualification_id"),
+  action: varchar("action", { length: 50 }).notNull(),
+  performedBy: integer("performed_by"),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 // Users table
 export const users = pgTable(
   "users",
@@ -58,9 +80,11 @@ export const users = pgTable(
     gender: varchar("gender", { length: 50 }),
     dateOfBirth: timestamp("date_of_birth"),
     educationalQualification: text("educational_qualification"),
+    qualificationId: integer("qualification_id").references(() => qualifications.id, { onDelete: "set null" }),
     specialization: varchar("specialization", { length: 255 }),
     teachingExperience: integer("teaching_experience"),
     address: text("address"),
+    postalCode: varchar("postal_code", { length: 20 }),
   },
   (table) => ({
     usernameIdx: uniqueIndex("username_idx").on(table.username),
@@ -93,6 +117,13 @@ export const profiles = pgTable(
     gracePeriodDays: integer("grace_period_days").default(7).notNull(),
     admissionDate: timestamp("admission_date").defaultNow(),
     paymentOption: varchar("payment_option", { length: 20 }).default("full_payment"),
+    paymentType: varchar("payment_type", { length: 50 }).default("full_payment"),
+    oneOnOneEnabled: boolean("one_on_one_enabled").default(false).notNull(),
+    groupSessionEnabled: boolean("group_session_enabled").default(false).notNull(),
+    sessionType: varchar("session_type", { length: 50 }).default("group"),
+    enrollmentStatus: varchar("enrollment_status", { length: 50 }).default("waiting_for_batch"),
+    moduleId: bigint("module_id", { mode: "number" }).references(() => modules.id, { onDelete: "set null" }),
+    preferredClassTime: varchar("preferred_class_time", { length: 50 }),
     downPayment: decimal("down_payment", { precision: 10, scale: 2 }).default("0"),
     remainingBalance: decimal("remaining_balance", { precision: 10, scale: 2 }).default("0"),
     totalCourseFee: decimal("total_course_fee", { precision: 10, scale: 2 }).default("0"),
@@ -115,9 +146,11 @@ export const profiles = pgTable(
     gender: varchar("gender", { length: 50 }),
     dob: timestamp("dob"),
     educationalQualification: text("educational_qualification"),
+    qualificationId: integer("qualification_id").references(() => qualifications.id, { onDelete: "set null" }),
     specialization: text("specialization"),
     experience: text("experience"),
     address: text("address"),
+    postalCode: varchar("postal_code", { length: 20 }),
     parentName: varchar("parent_name", { length: 255 }),
     parentPhone: varchar("parent_phone", { length: 20 }),
     parentCountryCode: varchar("parent_country_code", { length: 10 }),
@@ -162,6 +195,7 @@ export const batches = pgTable("batches", {
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
   timeSlot: varchar("time_slot", { length: 50 }),
+  sessionType: varchar("session_type", { length: 50 }).default("group"),
   teacherId: bigint("teacher_id", { mode: "number" }).references(() => users.id, { onDelete: "set null" }),
   maxStudents: integer("max_students").default(30),
   status: varchar("status", { length: 20 }).default("active"),
@@ -169,12 +203,6 @@ export const batches = pgTable("batches", {
   startDate: timestamp("start_date"),
   duration: varchar("duration", { length: 255 }),
   courseFee: decimal("course_fee", { precision: 10, scale: 2 }).default("0"),
-  oneOnOne30Allocated: integer("one_on_one_30_allocated").default(0).notNull(),
-  oneOnOne45Allocated: integer("one_on_one_45_allocated").default(0).notNull(),
-  oneOnOne60Allocated: integer("one_on_one_60_allocated").default(0).notNull(),
-  group30Allocated: integer("group_30_allocated").default(0).notNull(),
-  group45Allocated: integer("group_45_allocated").default(0).notNull(),
-  group60Allocated: integer("group_60_allocated").default(0).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -236,6 +264,7 @@ export const batchEnrollments = pgTable(
     group30Used: integer("group_30_used").default(0).notNull(),
     group45Used: integer("group_45_used").default(0).notNull(),
     group60Used: integer("group_60_used").default(0).notNull(),
+    studentFeeConfigId: bigint("student_fee_config_id", { mode: "number" }).references(() => studentFeeConfigurations.id, { onDelete: "set null" }),
   },
   (table) => ({
     uniqueEnrollment: uniqueIndex("unique_enrollment_idx").on(table.batchId, table.studentId),
@@ -390,12 +419,37 @@ export const flexibilityRequests = pgTable("flexibility_requests", {
   resolvedBy: bigint("resolved_by", { mode: "number" }).references(() => users.id, { onDelete: "set null" }),
 });
 
+// Student Fee Configurations (Single Source of Truth)
+export const studentFeeConfigurations = pgTable(
+  "student_fee_configurations",
+  {
+    id: serial("id").primaryKey(),
+    studentId: bigint("student_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    totalCourseFee: decimal("total_course_fee", { precision: 10, scale: 2 }).default("0").notNull(),
+    discount: decimal("discount", { precision: 10, scale: 2 }).default("0").notNull(),
+    discountType: varchar("discount_type", { length: 20 }).default("flat").notNull(), // 'flat' | 'percentage'
+    finalFee: decimal("final_fee", { precision: 10, scale: 2 }).default("0").notNull(),
+    paymentMode: varchar("payment_mode", { length: 50 }).default("FULL_PAYMENT").notNull(), // 'FULL_PAYMENT' | 'INSTALLMENT'
+    downPayment: decimal("down_payment", { precision: 10, scale: 2 }).default("0").notNull(),
+    numberOfInstallments: integer("number_of_installments").default(1).notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    uniqueStudentFeeConfig: uniqueIndex("unique_student_fee_config_idx").on(table.studentId),
+  })
+);
+
 // Payments
 export const payments = pgTable("payments", {
   id: serial("id").primaryKey(),
   studentId: bigint("student_id", { mode: "number" })
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  studentFeeConfigId: bigint("student_fee_config_id", { mode: "number" }).references(() => studentFeeConfigurations.id, { onDelete: "set null" }),
   amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
   type: varchar("type", { length: 50 }).default("tuition"),
   status: paymentStatusEnum("payment_status").notNull().default("paid"),
@@ -627,6 +681,9 @@ export const privateMessageAuditLogs = pgTable(
 );
 
 export type User = typeof users.$inferSelect;
+export type Qualification = typeof qualifications.$inferSelect;
+export type InsertQualification = typeof qualifications.$inferInsert;
+export type QualificationAuditLog = typeof qualificationAuditLogs.$inferSelect;
 export type PrivateMessageAuditLog = typeof privateMessageAuditLogs.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 export type Profile = typeof profiles.$inferSelect;
@@ -636,6 +693,8 @@ export type Message = typeof messages.$inferSelect;
 export type Class = typeof classes.$inferSelect;
 export type Attendance = typeof attendance.$inferSelect;
 export type Payment = typeof payments.$inferSelect;
+export type StudentFeeConfiguration = typeof studentFeeConfigurations.$inferSelect;
+export type InsertStudentFeeConfiguration = typeof studentFeeConfigurations.$inferInsert;
 export type Notification = typeof notifications.$inferSelect;
 export type FeedbackItem = typeof feedback.$inferSelect;
 export type FlexibilityRequest = typeof flexibilityRequests.$inferSelect;
@@ -1097,6 +1156,52 @@ export const studentClassAllocations = pgTable("student_class_allocations", {
 
 export type StudentClassAllocation = typeof studentClassAllocations.$inferSelect;
 export type InsertStudentClassAllocation = typeof studentClassAllocations.$inferInsert;
+
+// Performance configurations (criteria/weightage templates)
+export const performanceConfigs = pgTable("performance_configs", {
+  id: serial("id").primaryKey(),
+  type: varchar("type", { length: 20 }).notNull(), // 'student' or 'teacher'
+  name: varchar("name", { length: 255 }).notNull(),
+  criteria: json("criteria").notNull(), // weightages, qualitative items, etc.
+  isDefault: boolean("is_default").default(false).notNull(),
+  createdBy: bigint("created_by", { mode: "number" })
+    .references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Performance reports (assessments)
+export const performanceReports = pgTable("performance_reports", {
+  id: serial("id").primaryKey(),
+  parentReportId: integer("parent_report_id").references((): any => performanceReports.id, { onDelete: "set null" }),
+  version: integer("version").default(1).notNull(),
+  isLatest: boolean("is_latest").default(true).notNull(),
+  targetUserId: bigint("target_user_id", { mode: "number" })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  type: varchar("type", { length: 20 }).notNull(), // 'student' or 'teacher'
+  configId: bigint("config_id", { mode: "number" })
+    .references(() => performanceConfigs.id, { onDelete: "set null" }),
+  assessmentPeriod: varchar("assessment_period", { length: 50 }).notNull(), // 'monthly', 'quarterly', 'semester', 'yearly', 'custom'
+  startDate: timestamp("start_date").notNull(),
+  endDate: timestamp("end_date").notNull(),
+  status: varchar("status", { length: 20 }).default("draft").notNull(), // 'draft', 'published', 'archived'
+  autoMetrics: json("auto_metrics").notNull(),
+  qualitativeScores: json("qualitative_scores").notNull(), // empty if not used, or for custom qualitative criteria (optional)
+  totalScore: decimal("total_score", { precision: 5, scale: 2 }).notNull(),
+  grade: varchar("grade", { length: 10 }),
+  remarks: text("remarks"),
+  createdBy: bigint("created_by", { mode: "number" })
+    .references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PerformanceConfig = typeof performanceConfigs.$inferSelect;
+export type InsertPerformanceConfig = typeof performanceConfigs.$inferInsert;
+export type PerformanceReport = typeof performanceReports.$inferSelect;
+export type InsertPerformanceReport = typeof performanceReports.$inferInsert;
+
 
 
 

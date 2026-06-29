@@ -597,6 +597,8 @@ export default function SalesExecutivesAdminPage() {
                     <TableRow>
                       <TableHead className="text-xs font-semibold">Student ID</TableHead>
                       <TableHead className="text-xs font-semibold">Name</TableHead>
+                      <TableHead className="text-xs font-semibold">Qualification</TableHead>
+                      <TableHead className="text-xs font-semibold">Postal Code</TableHead>
                       <TableHead className="text-xs font-semibold">Course</TableHead>
                       <TableHead className="text-xs font-semibold">Date Registered</TableHead>
                       <TableHead className="text-xs font-semibold">Payment Status</TableHead>
@@ -607,6 +609,8 @@ export default function SalesExecutivesAdminPage() {
                       <TableRow key={student.id} className="hover:bg-gray-50/50 transition-colors">
                         <TableCell className="text-xs font-semibold font-mono text-emerald-800">{student.profile?.enrollmentId || student.unionId}</TableCell>
                         <TableCell className="text-xs font-semibold text-gray-900">{student.name}</TableCell>
+                        <TableCell className="text-xs text-gray-600">{student.profile?.educationalQualification || student.educationalQualification || "-"}</TableCell>
+                        <TableCell className="text-xs font-mono text-gray-600">{student.postalCode || student.profile?.postalCode || "-"}</TableCell>
                         <TableCell className="text-xs text-gray-700">{student.profile?.course || "-"}</TableCell>
                         <TableCell className="text-xs text-gray-500">{new Date(student.createdAt).toLocaleDateString()}</TableCell>
                         <TableCell className="text-xs">

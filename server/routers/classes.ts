@@ -802,9 +802,14 @@ export const classRouter = createRouter({
         throw new TRPCError({ code: "FORBIDDEN", message: "Only Admins or the assigned Teacher can create 1-to-1 sessions." });
       }
 
-      const remaining30 = Math.max(0, activeEnrollment.oneOnOne30Allocated - activeEnrollment.oneOnOne30Used);
-      const remaining45 = Math.max(0, activeEnrollment.oneOnOne45Allocated - activeEnrollment.oneOnOne45Used);
-      const remaining60 = Math.max(0, activeEnrollment.oneOnOne60Allocated - activeEnrollment.oneOnOne60Used);
+      const classAllocRecord = await db.query.studentClassAllocations.findFirst({
+        where: eq(studentClassAllocations.studentId, input.studentId),
+      });
+      const alloc = classAllocRecord?.allocation as any;
+
+      const remaining30 = alloc?.oneToOne?.remaining30 ?? Math.max(0, activeEnrollment.oneOnOne30Allocated - activeEnrollment.oneOnOne30Used);
+      const remaining45 = alloc?.oneToOne?.remaining45 ?? Math.max(0, activeEnrollment.oneOnOne45Allocated - activeEnrollment.oneOnOne45Used);
+      const remaining60 = alloc?.oneToOne?.remaining60 ?? Math.max(0, activeEnrollment.oneOnOne60Allocated - activeEnrollment.oneOnOne60Used);
 
       let remaining = 0;
       if (input.sessionLength === 30) remaining = remaining30;

@@ -1,4 +1,4 @@
-import { profiles, attendance, classes, oneToOneSessions, users, batchEnrollments } from "@db/schema";
+import { profiles, attendance, classes, oneToOneSessions, users, batchEnrollments, studentClassAllocations } from "@db/schema";
 import { eq, and, sql } from "drizzle-orm";
 import { sendNotification, sendBulkNotification, getAdminUserIds } from "./notificationEngine";
 
@@ -97,6 +97,50 @@ export async function updateStudentSessionBalances(db: any, studentId: number) {
       group60Used: completedGroup60,
     })
     .where(eq(batchEnrollments.id, enrollment.id));
+
+  // Sync studentClassAllocations table
+  const newAllocationJson = {
+    oneToOne: {
+      teacherId: (enrollment.assignedTeachers as any)?.[0] || null,
+      sessions30: sessionsO2O30,
+      sessions45: sessionsO2O45,
+      sessions60: sessionsO2O60,
+      completed30: completedO2O30,
+      completed45: completedO2O45,
+      completed60: completedO2O60,
+      remaining30: remainingO2O30,
+      remaining45: remainingO2O45,
+      remaining60: remainingO2O60
+    },
+    group: {
+      teacherId: (enrollment.assignedTeachers as any)?.[1] || (enrollment.assignedTeachers as any)?.[0] || null,
+      batchId: enrollment.batchId,
+      sessions30: sessionsGroup30,
+      sessions45: sessionsGroup45,
+      sessions60: sessionsGroup60,
+      completed30: completedGroup30,
+      completed45: completedGroup45,
+      completed60: completedGroup60,
+      remaining30: remainingGroup30,
+      remaining45: remainingGroup45,
+      remaining60: remainingGroup60
+    }
+  };
+
+  const existingAlloc = await db.query.studentClassAllocations.findFirst({
+    where: eq(studentClassAllocations.studentId, studentId)
+  });
+
+  if (existingAlloc) {
+    await db.update(studentClassAllocations)
+      .set({ allocation: newAllocationJson, updatedAt: new Date() })
+      .where(eq(studentClassAllocations.studentId, studentId));
+  } else {
+    await db.insert(studentClassAllocations).values({
+      studentId: studentId,
+      allocation: newAllocationJson,
+    });
+  }
 
   // Sync totals to profiles table
   const totalAllocatedO2O = sessionsO2O30 + sessionsO2O45 + sessionsO2O60;

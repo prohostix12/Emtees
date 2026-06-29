@@ -49,6 +49,8 @@ export default function StudentsPage() {
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive" | "pending_enrollment" | "alumni">("all");
   const [courseFilter, setCourseFilter] = useState<string>("all");
   const [batchFilter, setBatchFilter] = useState<string>("all");
+  const [qualificationFilter, setQualificationFilter] = useState<string>("all");
+  const [postalCodeFilter, setPostalCodeFilter] = useState<string>("");
   const [page, setPage] = useState(1);
   const limit = 20;
 
@@ -91,12 +93,17 @@ export default function StudentsPage() {
     password: string;
     courseId: number | "";
     batchId: number | "";
+    preferredClassTime?: string;
+    sessionType?: "one_on_one" | "group" | "both";
     feesTotal: number;
     allocatedOneToOneSessions: number;
     allocatedGroupSessions: number;
     paymentType: "FULL_PAYMENT" | "INSTALLMENT";
     gender: string;
     dob: string;
+    address: string;
+    postalCode: string;
+    qualificationId: number | "";
     educationalQualification: string;
     parentName: string;
     parentPhone: string;
@@ -115,12 +122,17 @@ export default function StudentsPage() {
     password: "",
     courseId: "",
     batchId: "",
+    preferredClassTime: "9:00 AM",
+    sessionType: "group",
     feesTotal: 0,
     allocatedOneToOneSessions: 0,
     allocatedGroupSessions: 0,
     paymentType: "FULL_PAYMENT",
     gender: "",
     dob: "",
+    address: "",
+    postalCode: "",
+    qualificationId: "",
     educationalQualification: "",
     parentName: "",
     parentPhone: "",
@@ -202,6 +214,9 @@ export default function StudentsPage() {
       paymentType: "FULL_PAYMENT",
       gender: "",
       dob: "",
+      address: "",
+      postalCode: "",
+      qualificationId: "",
       educationalQualification: "",
       parentName: "",
       parentPhone: "",
@@ -222,6 +237,7 @@ export default function StudentsPage() {
   };
 
   // tRPC Queries
+  const activeQualificationsQuery = trpc.qualifications.listActive.useQuery();
   const activeCoursesQuery = trpc.learning.listModules.useQuery();
   const activeCourses = activeCoursesQuery.data?.filter((m) => m.status === "active") || [];
   const selectedCourse = activeCourses.find((c) => c.id === Number(form.courseId));
@@ -235,6 +251,8 @@ export default function StudentsPage() {
     status: statusFilter,
     courseId: courseFilter !== "all" ? Number(courseFilter) : undefined,
     batchId: batchFilter !== "all" ? Number(batchFilter) : undefined,
+    qualificationId: qualificationFilter !== "all" ? Number(qualificationFilter) : undefined,
+    postalCode: postalCodeFilter || undefined,
     limit,
     offset: (page - 1) * limit,
   }, { enabled: isStaff });
@@ -663,24 +681,16 @@ export default function StudentsPage() {
   };
 
   const handleCourseChange = (courseIdVal: string) => {
-    setForm((prev) => ({
-      ...prev,
-      courseId: courseIdVal ? Number(courseIdVal) : "",
-      batchId: "",
-      feesTotal: 0,
-    }));
-  };
-
-  const handleBatchChange = (batchIdVal: string) => {
-    const bId = batchIdVal ? Number(batchIdVal) : "";
+    const cId = courseIdVal ? Number(courseIdVal) : "";
     let fee = 0;
-    if (bId) {
-      const selectedBatch = activeBatches.find((b: any) => b.id === bId);
-      fee = selectedBatch ? parseFloat(selectedBatch.courseFee || "0") : 0;
+    if (cId) {
+      const selectedCourse = activeCourses.find((c: any) => c.id === cId);
+      fee = selectedCourse ? parseFloat(selectedCourse.courseFee || "0") : 0;
     }
     setForm((prev) => ({
       ...prev,
-      batchId: bId,
+      courseId: cId,
+      batchId: "",
       feesTotal: fee,
     }));
     if (paymentType === "INSTALLMENT") {
@@ -701,12 +711,17 @@ export default function StudentsPage() {
       password: "",
       courseId: "",
       batchId: "",
+      preferredClassTime: "9:00 AM",
+      sessionType: "group",
       feesTotal: 0,
       allocatedOneToOneSessions: 0,
       allocatedGroupSessions: 0,
       paymentType: "FULL_PAYMENT",
       gender: "",
       dob: "",
+      address: "",
+      postalCode: "",
+      qualificationId: "",
       educationalQualification: "",
       parentName: "",
       parentPhone: "",
@@ -740,13 +755,17 @@ export default function StudentsPage() {
 
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.courseId || !form.batchId) {
-      toast.error("Course and Batch are required");
+    if (!form.courseId) {
+      toast.error("Course is required");
       return;
     }
     const error = validatePhoneNumber(form.countryCode, form.phoneNumber, form.countryISO);
     if (error) {
       toast.error(error);
+      return;
+    }
+    if (form.postalCode && !/^\d+$/.test(form.postalCode.trim())) {
+      toast.error("Postal code must contain numbers only.");
       return;
     }
     const sumInstallments = installments.reduce((sum, inst) => sum + inst.amount, 0);
@@ -757,9 +776,13 @@ export default function StudentsPage() {
 
     createStudentMutation.mutate({
       ...form,
+      sessionType: (form.sessionType as "one_on_one" | "group" | "both") || "group",
       enrollmentId: idGenerationType === "manual" ? form.enrollmentId : undefined,
       courseId: Number(form.courseId),
-      batchId: Number(form.batchId),
+      batchId: form.batchId ? Number(form.batchId) : undefined,
+      qualificationId: form.qualificationId ? Number(form.qualificationId) : undefined,
+      postalCode: form.postalCode ? form.postalCode.trim() : undefined,
+      address: form.address || undefined,
       paymentType,
       installments: paymentType === "INSTALLMENT" ? installments : undefined,
     });
@@ -783,7 +806,10 @@ export default function StudentsPage() {
       completionDate: u.profile?.completionDate ? new Date(u.profile.completionDate).toISOString().split("T")[0] : "",
       gender: u.profile?.gender || "",
       dob: u.profile?.dob ? new Date(u.profile.dob).toISOString().split("T")[0] : "",
-      educationalQualification: u.profile?.educationalQualification || "",
+      address: u.address || u.profile?.address || "",
+      postalCode: u.postalCode || u.profile?.postalCode || "",
+      qualificationId: u.qualificationId || u.profile?.qualificationId || "",
+      educationalQualification: u.qualificationName || u.profile?.educationalQualification || "",
       parentName: u.profile?.parentName || "",
       parentPhone: u.profile?.parentPhone || "",
       parentCountryCode: u.profile?.parentCountryCode || "+91",
@@ -804,6 +830,11 @@ export default function StudentsPage() {
       return;
     }
 
+    if (editStudent.postalCode && !/^\d+$/.test(editStudent.postalCode.trim())) {
+      toast.error("Postal code must contain numbers only.");
+      return;
+    }
+
     if (!editStudent.courseId) {
       toast.error("Course selection is mandatory.");
       return;
@@ -819,10 +850,15 @@ export default function StudentsPage() {
       return;
     }
 
+    const qualObj = activeQualificationsQuery.data?.find(q => String(q.id) === String(editStudent.qualificationId));
+
     updateStudentMutation.mutate({
       ...editStudent,
       courseId: Number(editStudent.courseId),
       batchId: Number(editStudent.batchId),
+      qualificationId: editStudent.qualificationId ? Number(editStudent.qualificationId) : null,
+      educationalQualification: qualObj ? qualObj.name : editStudent.educationalQualification,
+      postalCode: editStudent.postalCode ? editStudent.postalCode.trim() : "",
       dob: editStudent.dob || null,
       completionDate: editStudent.completionDate || null,
     });
@@ -839,12 +875,15 @@ export default function StudentsPage() {
       toast.error("No students available to export");
       return;
     }
-    const headers = ["Student ID", "Name", "Phone", "Email", "Course", "Batch", "Status", "Joined Date"];
+    const headers = ["Student ID", "Name", "Phone", "Email", "Qualification", "Address", "Postal Code", "Course", "Batch", "Status", "Joined Date"];
     const rows = studentsQuery.data.items.map((s) => [
       s.profile?.enrollmentId || s.unionId,
       s.name,
       s.phone || "",
       s.email || "",
+      s.qualificationName || s.profile?.educationalQualification || "",
+      s.address || s.profile?.address || "",
+      s.postalCode || s.profile?.postalCode || "",
       s.profile?.course || "",
       s.profile?.batch || "",
       s.status,
@@ -971,6 +1010,31 @@ export default function StudentsPage() {
                               <Input type="date" value={form.dob} onChange={(e) => setForm({ ...form, dob: e.target.value })} />
                             </div>
                           </div>
+                          <div className="space-y-1 md:col-span-2">
+                            <label className="text-xs font-semibold text-gray-600">Address</label>
+                            <Textarea placeholder="Full postal address" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} rows={2} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-gray-600">Postal Code</label>
+                            <Input placeholder="e.g. 682001" value={form.postalCode} onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-gray-600">Educational Qualification</label>
+                            <select
+                              className="border rounded h-9 px-3 text-xs bg-white w-full"
+                              value={form.qualificationId}
+                              onChange={(e) => {
+                                const qid = e.target.value ? Number(e.target.value) : "";
+                                const qObj = activeQualificationsQuery.data?.find(q => q.id === qid);
+                                setForm({ ...form, qualificationId: qid, educationalQualification: qObj ? qObj.name : "" });
+                              }}
+                            >
+                              <option value="">Select Qualification</option>
+                              {activeQualificationsQuery.data?.map((q) => (
+                                <option key={q.id} value={q.id}>{q.name}</option>
+                              ))}
+                            </select>
+                          </div>
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-gray-600">Parent/Guardian Name</label>
                             <Input placeholder="Parent Name" value={form.parentName} onChange={(e) => setForm({ ...form, parentName: e.target.value })} />
@@ -989,10 +1053,6 @@ export default function StudentsPage() {
                               parentPhone: data.fullNumber
                             })}
                           />
-                          <div className="space-y-1 md:col-span-2">
-                            <label className="text-xs font-semibold text-gray-600">Educational Qualification</label>
-                            <Input placeholder="B.Tech, Graduation, High School, etc." value={form.educationalQualification} onChange={(e) => setForm({ ...form, educationalQualification: e.target.value })} />
-                          </div>
                           <div className="space-y-1 md:col-span-2">
                             <label className="text-xs font-semibold text-gray-600">Username <span className="text-red-500">*</span></label>
                             <Input placeholder="Username for LMS login" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
@@ -1042,57 +1102,45 @@ export default function StudentsPage() {
                             )}
                           </div>
                           <div className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600">Select Course <span className="text-red-500">*</span></label>
+                            <label className="text-xs font-semibold text-gray-600">Select Module <span className="text-red-500">*</span></label>
                             <select
                               className="h-9 w-full rounded-md border border-input bg-white px-3 py-1 text-sm outline-none"
                               value={form.courseId}
                               onChange={(e) => handleCourseChange(e.target.value)}
                             >
-                              <option value="">Select Course</option>
+                              <option value="">Select Module</option>
                               {activeCourses.map((c) => (
                                 <option key={c.id} value={c.id}>{c.name}</option>
                               ))}
                             </select>
                           </div>
                           <div className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600">Select Batch <span className="text-red-500">*</span></label>
+                            <label className="text-xs font-semibold text-gray-600">Preferred Time Slot <span className="text-red-500">*</span></label>
+                            <Input
+                              placeholder="e.g. 7 AM or Morning"
+                              value={form.preferredClassTime || ""}
+                              onChange={(e) => setForm({ ...form, preferredClassTime: e.target.value })}
+                              required
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-gray-600">Session Type <span className="text-red-500">*</span></label>
                             <select
                               className="h-9 w-full rounded-md border border-input bg-white px-3 py-1 text-sm outline-none"
-                              value={form.batchId}
-                              onChange={(e) => handleBatchChange(e.target.value)}
-                              disabled={!form.courseId}
+                              value={form.sessionType || "group"}
+                              onChange={(e) => setForm({ ...form, sessionType: e.target.value as any })}
                             >
-                              <option value="">Select Batch</option>
-                              {activeBatches.map((b: any) => (
-                                <option key={b.id} value={b.id}>{b.name} (Fee: ₹{b.courseFee || "0"})</option>
-                              ))}
+                              <option value="group">Group Session</option>
+                              <option value="one_on_one">One-on-One Session</option>
+                              <option value="both">Both (Group + 1-on-1)</option>
                             </select>
                           </div>
-                          {form.batchId && (() => {
-                            const selectedBatch = activeBatches.find((b: any) => b.id === Number(form.batchId));
-                            if (!selectedBatch) return null;
-                            const oneToOneCount = (selectedBatch.oneOnOne30Allocated || 0) + (selectedBatch.oneOnOne45Allocated || 0) + (selectedBatch.oneOnOne60Allocated || 0);
-                            const groupCount = (selectedBatch.group30Allocated || 0) + (selectedBatch.group45Allocated || 0) + (selectedBatch.group60Allocated || 0);
-                            return (
-                              <div className="col-span-1 md:col-span-2 p-4 bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 rounded-xl text-xs space-y-2 mt-2">
-                                <p className="font-bold text-emerald-800 dark:text-emerald-400 uppercase tracking-wider text-[10px]">Selected Batch Package Details</p>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                  <div className="space-y-1">
-                                    <span className="font-semibold text-slate-700 dark:text-slate-300 block">One-on-One Sessions ({oneToOneCount} total):</span>
-                                    <div className="text-slate-500 dark:text-slate-400 font-mono">
-                                      30m: {selectedBatch.oneOnOne30Allocated || 0} | 45m: {selectedBatch.oneOnOne45Allocated || 0} | 60m: {selectedBatch.oneOnOne60Allocated || 0}
-                                    </div>
-                                  </div>
-                                  <div className="space-y-1">
-                                    <span className="font-semibold text-slate-700 dark:text-slate-300 block">Group Sessions ({groupCount} total):</span>
-                                    <div className="text-slate-500 dark:text-slate-400 font-mono">
-                                      30m: {selectedBatch.group30Allocated || 0} | 45m: {selectedBatch.group45Allocated || 0} | 60m: {selectedBatch.group60Allocated || 0}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })()}
+                          <div className="col-span-1 md:col-span-2 p-3 bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded-xl text-xs space-y-1">
+                            <p className="font-semibold text-amber-800 dark:text-amber-400">Batch Assignment Workflow</p>
+                            <p className="text-amber-700 dark:text-amber-300 text-[11px]">
+                              Students will enter a <strong>"Waiting for Batch"</strong> status upon enrollment. They will be dynamically assigned to a batch when an Academic Head or Admin forms a cohort matching their Module, Preferred Time Slot, and Session Type.
+                            </p>
+                          </div>
                         </div>
                       </div>
 
@@ -1197,13 +1245,13 @@ export default function StudentsPage() {
         </div>
 
         {/* Filter Toolbar */}
-        <div className="flex flex-col sm:flex-row items-center gap-2">
-          <div className="relative w-full sm:w-64">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative w-full sm:w-56">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <Input className="pl-9 w-full" placeholder="Search ID, Name, Phone..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
+            <Input className="pl-9 w-full" placeholder="Search ID, Name, Phone, Address..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
           </div>
           <select
-            className="border rounded-md px-3 py-2 text-sm bg-white w-full sm:w-48 outline-none"
+            className="border rounded-md px-3 py-2 text-sm bg-white w-full sm:w-40 outline-none"
             value={courseFilter}
             onChange={(e) => { setCourseFilter(e.target.value); setBatchFilter("all"); setPage(1); }}
           >
@@ -1213,7 +1261,7 @@ export default function StudentsPage() {
             ))}
           </select>
           <select
-            className="border rounded-md px-3 py-2 text-sm bg-white w-full sm:w-48 outline-none"
+            className="border rounded-md px-3 py-2 text-sm bg-white w-full sm:w-40 outline-none"
             value={batchFilter}
             onChange={(e) => { setBatchFilter(e.target.value); setPage(1); }}
             disabled={courseFilter === "all"}
@@ -1223,6 +1271,22 @@ export default function StudentsPage() {
               <option key={b.id} value={b.id}>{b.name}</option>
             ))}
           </select>
+          <select
+            className="border rounded-md px-3 py-2 text-sm bg-white w-full sm:w-40 outline-none"
+            value={qualificationFilter}
+            onChange={(e) => { setQualificationFilter(e.target.value); setPage(1); }}
+          >
+            <option value="all">All Qualifications</option>
+            {activeQualificationsQuery.data?.map((q) => (
+              <option key={q.id} value={q.id}>{q.name}</option>
+            ))}
+          </select>
+          <Input
+            className="w-full sm:w-36 text-sm bg-white"
+            placeholder="Postal Code"
+            value={postalCodeFilter}
+            onChange={(e) => { setPostalCodeFilter(e.target.value); setPage(1); }}
+          />
         </div>
       </div>
 
@@ -1235,7 +1299,10 @@ export default function StudentsPage() {
                 <TableHead>Student ID</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead>Phone</TableHead>
+                <TableHead>Qualification</TableHead>
+                <TableHead>Postal Code</TableHead>
                 <TableHead>Course</TableHead>
+                <TableHead>Session Type</TableHead>
                 <TableHead>Batch</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Joined</TableHead>
@@ -1243,39 +1310,63 @@ export default function StudentsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {studentsList.map((s) => (
-                <TableRow
-                  key={s.id}
-                  className="cursor-pointer hover:bg-slate-50/50"
-                  onClick={(e) => {
-                    const target = e.target as HTMLElement;
-                    if (target.closest("button") || target.closest("a")) return;
-                    setDetailsStudentId(s.id);
-                  }}
-                >
-                  <TableCell className="font-mono text-xs font-semibold text-emerald-800">{s.profile?.enrollmentId || s.unionId}</TableCell>
-                  <TableCell className="font-medium">{s.name}</TableCell>
-                  <TableCell>{s.phone}</TableCell>
-                  <TableCell>{s.profile?.course || "-"}</TableCell>
-                  <TableCell>{s.profile?.batch || "-"}</TableCell>
-                  <TableCell>{getStatusBadge(s.status, s.profile?.completionDate)}</TableCell>
-                  <TableCell>{s.createdAt ? new Date(s.createdAt).toLocaleDateString() : "-"}</TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => setDetailsStudentId(s.id)}><Eye className="w-3.5 h-3.5" /></Button>
-                      {isAdmin && (
-                        <>
-                          <Button size="sm" variant="ghost" onClick={() => handleEditOpen(s)}><Edit className="w-3.5 h-3.5" /></Button>
-                          <Button size="sm" variant="ghost" className="text-red-500 hover:text-red-700" onClick={() => setDeleteId(s.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
-                        </>
+              {studentsList.map((s) => {
+                const isO2O = s.profile?.oneOnOneEnabled;
+                const isGrp = s.profile?.groupSessionEnabled;
+                const sessionLabel = isO2O && isGrp ? "Both" : isO2O ? "One-on-One" : isGrp ? "Group" : "None";
+                const sessionBadgeClass = isO2O && isGrp ? "bg-purple-100 text-purple-800 border-purple-200" : isO2O ? "bg-blue-100 text-blue-800 border-blue-200" : isGrp ? "bg-emerald-100 text-emerald-800 border-emerald-200" : "bg-gray-100 text-gray-600";
+                const qualDisplay = s.qualificationName || s.profile?.educationalQualification || "-";
+                const postalDisplay = s.postalCode || s.profile?.postalCode || "-";
+
+                return (
+                  <TableRow
+                    key={s.id}
+                    className="cursor-pointer hover:bg-slate-50/50"
+                    onClick={(e) => {
+                      const target = e.target as HTMLElement;
+                      if (target.closest("button") || target.closest("a")) return;
+                      setDetailsStudentId(s.id);
+                    }}
+                  >
+                    <TableCell className="font-mono text-xs font-semibold text-emerald-800">{s.profile?.enrollmentId || s.unionId}</TableCell>
+                    <TableCell className="font-medium">{s.name}</TableCell>
+                    <TableCell>{s.phone}</TableCell>
+                    <TableCell>{qualDisplay}</TableCell>
+                    <TableCell className="font-mono text-xs">{postalDisplay}</TableCell>
+                    <TableCell>{s.profile?.course || "-"}</TableCell>
+                    <TableCell>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${sessionBadgeClass}`}>
+                        {sessionLabel}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      {s.profile?.batch ? (
+                        s.profile.batch
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                          Waiting for Batch
+                        </span>
                       )}
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                    <TableCell>{getStatusBadge(s.status, s.profile?.completionDate)}</TableCell>
+                    <TableCell>{s.createdAt ? new Date(s.createdAt).toLocaleDateString() : "-"}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button size="sm" variant="ghost" onClick={() => setDetailsStudentId(s.id)}><Eye className="w-3.5 h-3.5" /></Button>
+                        {isAdmin && (
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => handleEditOpen(s)}><Edit className="w-3.5 h-3.5" /></Button>
+                            <Button size="sm" variant="ghost" className="text-red-500 hover:text-red-700" onClick={() => setDeleteId(s.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
+                          </>
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
               {studentsList.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-gray-500 py-10">
+                  <TableCell colSpan={11} className="text-center text-gray-500 py-10">
                     {studentsQuery.isLoading ? "Loading student records..." : "No student records found"}
                   </TableCell>
                 </TableRow>
@@ -1345,39 +1436,41 @@ export default function StudentsPage() {
               <AlertTriangle className="w-5 h-5 text-amber-500" />
               Confirm Fee Rules Change
             </AlertDialogTitle>
-            <AlertDialogDescription className="space-y-4 text-xs text-slate-600 mt-2 text-left">
-              <p>You are about to modify the fee rules for this student. This will recalculate their outstanding balance and recreate their future unpaid installments. <strong>Completed payments will remain untouched.</strong></p>
+            <AlertDialogDescription asChild>
+              <div className="space-y-4 text-xs text-slate-600 mt-2 text-left">
+                <p>You are about to modify the fee rules for this student. This will recalculate their outstanding balance and recreate their future unpaid installments. <strong>Completed payments will remain untouched.</strong></p>
 
-              {feeRulesState && profileQuery.data && (
-                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mt-3 text-xs text-left">
-                  <div className="space-y-2">
-                    <h5 className="font-bold text-gray-500 uppercase tracking-wider text-[10px]">Previous Configuration</h5>
-                    <p><strong>Type:</strong> {profileQuery.data.student.profile?.paymentOption === "installment" ? "Installment" : "Full Payment"}</p>
-                    <p><strong>Total Fee:</strong> ₹{parseFloat(profileQuery.data.student.profile?.totalCourseFee || profileQuery.data.student.profile?.feesTotal || "0").toLocaleString("en-IN")}</p>
-                    <p><strong>Outstanding:</strong> ₹{parseFloat(profileQuery.data.student.profile?.feesBalance || "0").toLocaleString("en-IN")}</p>
-                    <p><strong>Installments:</strong> {profileQuery.data.payments.filter((p: any) => p.type === "tuition").length}</p>
+                {feeRulesState && profileQuery.data && (
+                  <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mt-3 text-xs text-left">
+                    <div className="space-y-2">
+                      <h5 className="font-bold text-gray-500 uppercase tracking-wider text-[10px]">Previous Configuration</h5>
+                      <p><strong>Type:</strong> {profileQuery.data.student.profile?.paymentOption === "installment" ? "Installment" : "Full Payment"}</p>
+                      <p><strong>Total Fee:</strong> ₹{parseFloat(profileQuery.data.student.profile?.totalCourseFee || profileQuery.data.student.profile?.feesTotal || "0").toLocaleString("en-IN")}</p>
+                      <p><strong>Outstanding:</strong> ₹{parseFloat(profileQuery.data.student.profile?.feesBalance || "0").toLocaleString("en-IN")}</p>
+                      <p><strong>Installments:</strong> {profileQuery.data.payments.filter((p: any) => p.type === "tuition").length}</p>
+                    </div>
+
+                    <div className="space-y-2 border-l pl-4">
+                      <h5 className="font-bold text-emerald-600 uppercase tracking-wider text-[10px]">New Configuration</h5>
+                      <p><strong>Type:</strong> {feeRulesState.paymentType === "INSTALLMENT" ? "Installment" : "Full Payment"}</p>
+                      <p><strong>Total Fee:</strong> ₹{feeRulesState.totalCourseFee.toLocaleString("en-IN")}</p>
+                      <p><strong>Outstanding:</strong> ₹{(feeRulesState.totalCourseFee - profileQuery.data.payments.filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</p>
+                      <p><strong>Installments:</strong> {feeRulesState.installments.length}</p>
+                    </div>
                   </div>
+                )}
 
-                  <div className="space-y-2 border-l pl-4">
-                    <h5 className="font-bold text-emerald-600 uppercase tracking-wider text-[10px]">New Configuration</h5>
-                    <p><strong>Type:</strong> {feeRulesState.paymentType === "INSTALLMENT" ? "Installment" : "Full Payment"}</p>
-                    <p><strong>Total Fee:</strong> ₹{feeRulesState.totalCourseFee.toLocaleString("en-IN")}</p>
-                    <p><strong>Outstanding:</strong> ₹{(feeRulesState.totalCourseFee - profileQuery.data.payments.filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</p>
-                    <p><strong>Installments:</strong> {feeRulesState.installments.length}</p>
+                {feeRulesState && (
+                  <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-amber-800 space-y-1 text-left">
+                    <p className="font-semibold">Effect Summary:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>Unpaid future installments recreated: <strong>{feeRulesState.installments.filter(i => i.status === "unpaid").length}</strong></li>
+                      <li>Preserved completed payments: <strong>{feeRulesState.installments.filter(i => i.status === "paid").length}</strong></li>
+                      <li>Updated Outstanding Balance: <strong>₹{(feeRulesState.totalCourseFee - (profileQuery.data?.payments || []).filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</strong></li>
+                    </ul>
                   </div>
-                </div>
-              )}
-
-              {feeRulesState && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-amber-800 space-y-1 text-left">
-                  <p className="font-semibold">Effect Summary:</p>
-                  <ul className="list-disc list-inside space-y-0.5">
-                    <li>Unpaid future installments recreated: <strong>{feeRulesState.installments.filter(i => i.status === "unpaid").length}</strong></li>
-                    <li>Preserved completed payments: <strong>{feeRulesState.installments.filter(i => i.status === "paid").length}</strong></li>
-                    <li>Updated Outstanding Balance: <strong>₹{(feeRulesState.totalCourseFee - (profileQuery.data?.payments || []).filter((p: any) => p.type === "tuition" && p.status === "paid").reduce((sum: number, p: any) => sum + parseFloat(p.amount), 0)).toLocaleString("en-IN")}</strong></li>
-                  </ul>
-                </div>
-              )}
+                )}
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1563,9 +1656,30 @@ export default function StudentsPage() {
                           <Input type="date" value={editStudent.dob} onChange={(e) => setEditStudent({ ...editStudent, dob: e.target.value })} />
                         </div>
                       </div>
+                      <div className="space-y-1 sm:col-span-2">
+                        <label className="text-xs text-gray-500">Address</label>
+                        <Textarea placeholder="Full postal address" value={editStudent.address} onChange={(e) => setEditStudent({ ...editStudent, address: e.target.value })} rows={2} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-500">Postal Code</label>
+                        <Input value={editStudent.postalCode} onChange={(e) => setEditStudent({ ...editStudent, postalCode: e.target.value })} placeholder="e.g. 682001" />
+                      </div>
                       <div className="space-y-1">
                         <label className="text-xs text-gray-500">Educational Qualification</label>
-                        <Input value={editStudent.educationalQualification} onChange={(e) => setEditStudent({ ...editStudent, educationalQualification: e.target.value })} />
+                        <select
+                          className="border rounded h-9 px-3 text-sm bg-white w-full"
+                          value={editStudent.qualificationId}
+                          onChange={(e) => {
+                            const qid = e.target.value ? Number(e.target.value) : "";
+                            const qObj = activeQualificationsQuery.data?.find(q => q.id === qid);
+                            setEditStudent({ ...editStudent, qualificationId: qid, educationalQualification: qObj ? qObj.name : "" });
+                          }}
+                        >
+                          <option value="">Select Qualification</option>
+                          {activeQualificationsQuery.data?.map((q) => (
+                            <option key={q.id} value={q.id}>{q.name}</option>
+                          ))}
+                        </select>
                       </div>
                       <div className="space-y-1">
                         <label className="text-xs text-gray-500">Parent/Guardian Name</label>
@@ -1646,9 +1760,11 @@ export default function StudentsPage() {
                       <CardContent className="p-4 space-y-2 text-sm text-slate-600">
                         <p><strong>Email:</strong> {profileQuery.data.student.email || "-"}</p>
                         <p><strong>Phone:</strong> {profileQuery.data.student.phone || "-"}</p>
+                        <p><strong>Qualification:</strong> {(profileQuery.data.student as any).qualification?.name || (profileQuery.data.student.profile as any)?.qualification?.name || profileQuery.data.student.profile?.educationalQualification || profileQuery.data.student.educationalQualification || "-"}</p>
+                        <p><strong>Postal Code:</strong> <span className="font-mono text-xs">{profileQuery.data.student.postalCode || profileQuery.data.student.profile?.postalCode || "-"}</span></p>
+                        <p><strong>Address:</strong> {profileQuery.data.student.address || profileQuery.data.student.profile?.address || "-"}</p>
                         <p><strong>Gender:</strong> <span className="capitalize">{profileQuery.data.student.profile?.gender || "-"}</span></p>
                         <p><strong>DOB:</strong> {profileQuery.data.student.profile?.dob ? new Date(profileQuery.data.student.profile.dob).toLocaleDateString() : "-"}</p>
-                        <p><strong>Education:</strong> {profileQuery.data.student.profile?.educationalQualification || "-"}</p>
                       </CardContent>
                     </Card>
 

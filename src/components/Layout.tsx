@@ -28,6 +28,7 @@ import {
   Contact,
   Clock,
   User,
+  Award,
 } from "lucide-react";
 import { useSocket, useClassStartedAlert } from "@/hooks/useSocket";
 import { trpc } from "@/providers/trpc";
@@ -38,6 +39,7 @@ const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/" },
   { icon: Users, label: "Users", path: "/users" },
   { icon: Contact, label: "Students", path: "/students" },
+  { icon: GraduationCap, label: "Qualifications", path: "/qualifications" },
   { icon: Users, label: "Sales Executives", path: "/sales-management/executives" },
   { icon: BookOpen, label: "Batches", path: "/batches" },
   { icon: MessageCircle, label: "Chat", path: "/chat" },
@@ -49,6 +51,7 @@ const navItems = [
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Coins, label: "Salaries", path: "/salaries" },
   { icon: Star, label: "Feedback", path: "/feedback" },
+  { icon: Award, label: "Performance", path: "/performance" },
   { icon: GitPullRequest, label: "Requests", path: "/requests" },
   { icon: BarChart3, label: "Reports", path: "/reports" },
   { icon: Bell, label: "Notifications", path: "/notifications" },
@@ -67,6 +70,7 @@ const studentNav = [
   { icon: GraduationCap, label: "Learning", path: "/learning" },
   { icon: CreditCard, label: "Fees", path: "/fees" },
   { icon: Star, label: "Feedback", path: "/feedback" },
+  { icon: Award, label: "Performance", path: "/performance" },
   { icon: GitPullRequest, label: "Requests", path: "/requests" },
   { icon: BarChart3, label: "Progress", path: "/reports" },
   { icon: Bell, label: "Alerts", path: "/notifications" },
@@ -179,11 +183,23 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   if (!["super_admin", "admin"].includes(user.role)) {
     items = items.filter((item) => item.path !== "/sales-management/executives");
   }
-  if (user.role === "academic_head") {
-    items = items.filter((item) => item.path !== "/settings" && item.path !== "/fees");
+  if (!["super_admin", "admin", "academic_head"].includes(user.role)) {
+    items = items.filter((item) => item.path !== "/qualifications");
   }
-  if (["academic_head"].includes(user.role)) {
-    items = items.filter((item) => item.path !== "/requests");
+  if (user.role === "academic_head") {
+    const allowedPaths = [
+      "/",
+      "/students",
+      "/batches",
+      "/classes/group",
+      "/classes/one-to-one",
+      "/feedback",
+      "/performance",
+      "/notifications",
+      "/discipline",
+      "/qualifications",
+    ];
+    items = items.filter((item) => allowedPaths.includes(item.path));
   }
   const currentLabel = items.find((i) => i.path === pathname)?.label || "Dashboard";
 

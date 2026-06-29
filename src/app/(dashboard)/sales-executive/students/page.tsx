@@ -103,6 +103,8 @@ export default function MyStudentsPage() {
                   <TableHead className="text-xs font-semibold">Student ID</TableHead>
                   <TableHead className="text-xs font-semibold">Student Name</TableHead>
                   <TableHead className="text-xs font-semibold">Phone</TableHead>
+                  <TableHead className="text-xs font-semibold">Qualification</TableHead>
+                  <TableHead className="text-xs font-semibold">Postal Code</TableHead>
                   <TableHead className="text-xs font-semibold">Course</TableHead>
                   <TableHead className="text-xs font-semibold">Joined Date</TableHead>
                   <TableHead className="text-xs font-semibold">Status</TableHead>
@@ -112,13 +114,13 @@ export default function MyStudentsPage() {
               <TableBody>
                 {studentsQuery.isLoading ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-xs text-gray-500 py-10">
+                    <TableCell colSpan={9} className="text-center text-xs text-gray-500 py-10">
                       Loading students list...
                     </TableCell>
                   </TableRow>
                 ) : students.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-xs text-gray-500 py-10">
+                    <TableCell colSpan={9} className="text-center text-xs text-gray-500 py-10">
                       No students found matching filters.
                     </TableCell>
                   </TableRow>
@@ -133,6 +135,12 @@ export default function MyStudentsPage() {
                       </TableCell>
                       <TableCell className="text-xs text-gray-600">
                         {student.phone || "-"}
+                      </TableCell>
+                      <TableCell className="text-xs text-gray-600">
+                        {student.profile?.educationalQualification || student.educationalQualification || "-"}
+                      </TableCell>
+                      <TableCell className="text-xs font-mono text-gray-600">
+                        {student.postalCode || student.profile?.postalCode || "-"}
                       </TableCell>
                       <TableCell className="text-xs text-gray-700">
                         {student.profile?.course || "-"}

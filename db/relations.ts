@@ -45,9 +45,22 @@ import {
   salesExecutives,
   studentCourseAuditLogs,
   studentClassAllocations,
+  performanceConfigs,
+  performanceReports,
+  qualifications,
+  studentFeeConfigurations,
 } from "./schema";
 
+export const qualificationsRelations = relations(qualifications, ({ many }) => ({
+  users: many(users),
+  profiles: many(profiles),
+}));
+
 export const usersRelations = relations(users, ({ one, many }) => ({
+  qualification: one(qualifications, {
+    fields: [users.qualificationId],
+    references: [qualifications.id],
+  }),
   profile: one(profiles, {
     fields: [users.id],
     references: [profiles.userId],
@@ -86,12 +99,20 @@ export const usersRelations = relations(users, ({ one, many }) => ({
     references: [salesExecutives.id],
     relationName: "referredStudents",
   }),
+  feeConfig: one(studentFeeConfigurations, {
+    fields: [users.id],
+    references: [studentFeeConfigurations.studentId],
+  }),
 }));
 
 export const profilesRelations = relations(profiles, ({ one }) => ({
   user: one(users, {
     fields: [profiles.userId],
     references: [users.id],
+  }),
+  qualification: one(qualifications, {
+    fields: [profiles.qualificationId],
+    references: [qualifications.id],
   }),
 }));
 
@@ -136,6 +157,10 @@ export const batchEnrollmentsRelations = relations(batchEnrollments, ({ one }) =
   module: one(modules, {
     fields: [batchEnrollments.moduleId],
     references: [modules.id],
+  }),
+  feeConfig: one(studentFeeConfigurations, {
+    fields: [batchEnrollments.studentFeeConfigId],
+    references: [studentFeeConfigurations.id],
   }),
 }));
 
@@ -225,6 +250,19 @@ export const paymentsRelations = relations(payments, ({ one }) => ({
     fields: [payments.batchId],
     references: [batches.id],
   }),
+  feeConfig: one(studentFeeConfigurations, {
+    fields: [payments.studentFeeConfigId],
+    references: [studentFeeConfigurations.id],
+  }),
+}));
+
+export const studentFeeConfigurationsRelations = relations(studentFeeConfigurations, ({ one, many }) => ({
+  student: one(users, {
+    fields: [studentFeeConfigurations.studentId],
+    references: [users.id],
+  }),
+  enrollments: many(batchEnrollments),
+  payments: many(payments),
 }));
 
 export const teacherSalariesRelations = relations(teacherSalaries, ({ one }) => ({
@@ -594,5 +632,36 @@ export const studentClassAllocationsRelations = relations(studentClassAllocation
     references: [users.id],
   }),
 }));
+
+export const performanceConfigsRelations = relations(performanceConfigs, ({ one }) => ({
+  createdBy: one(users, {
+    fields: [performanceConfigs.createdBy],
+    references: [users.id],
+  }),
+}));
+
+export const performanceReportsRelations = relations(performanceReports, ({ one, many }) => ({
+  createdBy: one(users, {
+    fields: [performanceReports.createdBy],
+    references: [users.id],
+  }),
+  targetUser: one(users, {
+    fields: [performanceReports.targetUserId],
+    references: [users.id],
+  }),
+  config: one(performanceConfigs, {
+    fields: [performanceReports.configId],
+    references: [performanceConfigs.id],
+  }),
+  parentReport: one(performanceReports, {
+    fields: [performanceReports.parentReportId],
+    references: [performanceReports.id],
+    relationName: "performanceReportVersions",
+  }),
+  childReports: many(performanceReports, {
+    relationName: "performanceReportVersions",
+  }),
+}));
+
 
 
